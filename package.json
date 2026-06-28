@@ -1,0 +1,19 @@
+{
+    "name": "aurelium-web",
+    "version": "1.0.0",
+    "description": "Central web dashboard for Aurelium Minecraft economy plugin",
+    "main": "server.js",
+    "scripts": {
+        "start": "node server.js",
+        "dev": "node --watch server.js"
+    },
+    "dependencies": {
+        "cors": "^2.8.5",
+        "express": "^4.21.0",
+        "express-rate-limit": "^8.2.1",
+        "helmet": "^8.1.0"
+    },
+    "engines": {
+        "node": ">=20.0.0"
+    }
+}

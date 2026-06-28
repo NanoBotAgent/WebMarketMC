@@ -84,9 +84,10 @@ async function astraDelete(table, pk) {
     return astraFetch(table, 'DELETE', pk);
 }
 
-// Query rows with a filter
+// Query rows with a filter (value is escaped for CQL safety)
 async function astraQuery(table, column, value) {
-    const url = `${ASTRA_REST}/${table}?where={"${column}":{"$eq":"${value}"}}`;
+    const safeValue = String(value).replace(/"/g, '\\"');
+    const url = `${ASTRA_REST}/${table}?where={"${column}":{"$eq":"${safeValue}"}}`;
     const resp = await fetch(url, {
         headers: {
             'Authorization': `Bearer ${ASTRA_TOKEN}`,
