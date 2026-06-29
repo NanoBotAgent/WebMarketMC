@@ -916,6 +916,105 @@ header {
     cursor: pointer;
 }
 
+/* Custom Select Dropdown */
+.custom-select {
+    position: relative;
+    min-width: 180px;
+}
+
+.custom-select-trigger {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 10px 16px;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 14px;
+    cursor: pointer;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.custom-select-trigger:hover {
+    border-color: var(--accent);
+}
+
+.custom-select-trigger:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+.custom-select-trigger[aria-expanded="true"] {
+    border-color: var(--accent);
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
+}
+
+.custom-select-arrow {
+    margin-left: 4px;
+    color: var(--text-muted);
+    transition: transform 0.2s ease;
+    flex-shrink: 0;
+}
+
+.custom-select-trigger[aria-expanded="true"] .custom-select-arrow {
+    transform: rotate(180deg);
+}
+
+.custom-select-options {
+    position: absolute;
+    top: calc(100% - 1px);
+    left: 0;
+    right: 0;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-top: none;
+    border-radius: 0 0 var(--radius) var(--radius);
+    list-style: none;
+    margin: 0;
+    padding: 4px 0;
+    z-index: 100;
+    opacity: 0;
+    visibility: hidden;
+    transform: translateY(-8px);
+    transition: opacity 0.15s ease, transform 0.15s ease, visibility 0.15s ease;
+    box-shadow: var(--shadow-lg);
+}
+
+.custom-select-options.open {
+    opacity: 1;
+    visibility: visible;
+    transform: translateY(0);
+}
+
+.custom-select-options li {
+    padding: 10px 16px;
+    color: var(--text-primary);
+    font-size: 14px;
+    cursor: pointer;
+    transition: background 0.1s ease;
+}
+
+.custom-select-options li:hover,
+.custom-select-options li:focus {
+    background: var(--bg-card-hover);
+    outline: none;
+}
+
+.custom-select-options li.selected {
+    color: var(--accent);
+    font-weight: 500;
+}
+
+.custom-select-options li.selected::before {
+    content: "\2713 ";
+    margin-right: 8px;
+}
+
 .stocks-table-wrap {
     padding: 0 32px;
     max-width: 1200px;
@@ -1200,6 +1299,30 @@ header {
     }
 }
 
+@keyframes fadeOut {
+    from { opacity: 1; }
+    to { opacity: 0; }
+}
+
+@keyframes modalSlideOut {
+    from {
+        transform: translateY(0);
+        opacity: 1;
+    }
+    to {
+        transform: translateY(20px);
+        opacity: 0;
+    }
+}
+
+.modal-overlay.closing {
+    animation: fadeOut 0.15s ease forwards;
+}
+
+.modal-overlay.closing .modal {
+    animation: modalSlideOut 0.15s ease forwards;
+}
+
 .modal-header {
     display: flex;
     align-items: center;
@@ -1295,6 +1418,17 @@ header {
 
 .amount-btn:hover {
     background: var(--bg-card-hover);
+}
+
+.amount-btn:disabled,
+.amount-btn.at-limit {
+    opacity: 0.35;
+    cursor: not-allowed;
+    background: var(--bg-elevated);
+}
+
+.amount-btn.at-limit:hover {
+    background: var(--bg-elevated);
 }
 
 .amount-controls input {

@@ -237,11 +237,18 @@
         </div>
         <div class="stocks-controls">
             <input type="text" id="stocks-search" placeholder="Search items..." autocomplete="off">
-            <select id="stocks-sort">
-                <option value="name">Sort by Name</option>
-                <option value="buyPrice">Sort by Buy Price</option>
-                <option value="change">Sort by Change %</option>
-            </select>
+            <div class="custom-select" id="stocks-sort">
+                <button type="button" class="custom-select-trigger" aria-haspopup="listbox" aria-expanded="false">
+                    <span class="custom-select-value">Sort by Name</span>
+                    <svg class="custom-select-arrow" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"></polyline></svg>
+                </button>
+                <ul class="custom-select-options" role="listbox" aria-label="Sort options">
+                    <li role="option" data-value="name" class="selected">Sort by Name</li>
+                    <li role="option" data-value="buyPrice">Sort by Buy Price</li>
+                    <li role="option" data-value="sellPrice">Sort by Sell Price</li>
+                    <li role="option" data-value="change">Sort by Change %</li>
+                </ul>
+            </div>
         </div>
         <div class="stocks-table-wrap" id="stocks-table-wrap">
             <table class="stocks-table" id="stocks-table">

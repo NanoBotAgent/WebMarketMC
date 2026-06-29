@@ -371,17 +371,22 @@ function updateBreadcrumb(name) {
 // ── Buy Modal ────────────────────────────────────────────────────
 
 let modalItem = {};
+let currentBuyContext = null;
 
-function openBuyModal(key, name, price, formatted, currency, material) {
+function openBuyModal(key, name, price, formatted, currency, material, maxQty = 64) {
     modalItem = { key, name, price, formatted, currency, material };
+    currentBuyContext = { maxQty };
     document.getElementById('modal-item-name').textContent = name;
     document.getElementById('modal-item-price').textContent = formatted;
     document.getElementById('modal-icon').innerHTML =
         `<img src="${IMG_BASE}${material?.toLowerCase() || 'stone'}" width="36" height="36" style="image-rendering:pixelated"
               onerror="handleItemIconError(this, '${escJs(material || 'stone')}')">`;
     document.getElementById('amount-input').value = 1;
+    document.getElementById('amount-input').max = maxQty;
     updateModalTotal();
+    updateQtyButtonStates('amount-input', 'amount-minus', 'amount-plus', maxQty);
     document.getElementById('buy-modal').style.display = '';
+    document.getElementById('buy-modal').classList.remove('closing');
 }
 
 function updateModalTotal() {
@@ -392,22 +397,27 @@ function updateModalTotal() {
 }
 
 document.getElementById('modal-close')?.addEventListener('click', () => {
-    document.getElementById('buy-modal').style.display = 'none';
+    closeModal('buy-modal');
 });
 document.getElementById('modal-cancel')?.addEventListener('click', () => {
-    document.getElementById('buy-modal').style.display = 'none';
+    closeModal('buy-modal');
 });
 document.getElementById('amount-minus')?.addEventListener('click', () => {
     const inp = document.getElementById('amount-input');
     inp.value = Math.max(1, (parseInt(inp.value) || 1) - 1);
     updateModalTotal();
+    updateQtyButtonStates('amount-input', 'amount-minus', 'amount-plus', currentBuyContext?.maxQty || 64);
 });
 document.getElementById('amount-plus')?.addEventListener('click', () => {
     const inp = document.getElementById('amount-input');
-    inp.value = Math.min(64, (parseInt(inp.value) || 1) + 1);
+    inp.value = Math.min(currentBuyContext?.maxQty || 64, (parseInt(inp.value) || 1) + 1);
     updateModalTotal();
+    updateQtyButtonStates('amount-input', 'amount-minus', 'amount-plus', currentBuyContext?.maxQty || 64);
 });
-document.getElementById('amount-input')?.addEventListener('input', updateModalTotal);
+document.getElementById('amount-input')?.addEventListener('input', () => {
+    updateModalTotal();
+    updateQtyButtonStates('amount-input', 'amount-minus', 'amount-plus', currentBuyContext?.maxQty || 64);
+});
 
 document.getElementById('modal-buy')?.addEventListener('click', async () => {
     const btn = document.getElementById('modal-buy');
@@ -578,13 +588,14 @@ function openAuctionModal(id, isBin, name, material, price, currencyStr) {
     }
 
     document.getElementById('auction-modal').style.display = 'flex';
+    document.getElementById('auction-modal').classList.remove('closing');
 }
 
 document.getElementById('auction-modal-close')?.addEventListener('click', () => {
-    document.getElementById('auction-modal').style.display = 'none';
+    closeModal('auction-modal');
 });
 document.getElementById('auction-modal-cancel')?.addEventListener('click', () => {
-    document.getElementById('auction-modal').style.display = 'none';
+    closeModal('auction-modal');
 });
 
 document.getElementById('auction-modal-submit')?.addEventListener('click', async () => {
@@ -614,7 +625,7 @@ document.getElementById('auction-modal-submit')?.addEventListener('click', async
 
         if (result.success) {
             showToast('success', currentAuctionContext.isBin ? 'Purchase queued...' : 'Bid placed... waiting for server confirmation.');
-            document.getElementById('auction-modal').style.display = 'none';
+            closeModal('auction-modal');
             pollPurchase(result.purchaseId);
         } else {
             showToast('error', result.error || 'Request failed');
@@ -722,20 +733,25 @@ document.getElementById('order-fill-amount-minus')?.addEventListener('click', ()
     const inp = document.getElementById('order-fill-amount-input');
     inp.value = Math.max(1, (parseInt(inp.value) || 1) - 1);
     updateOrderFillTotal();
+    updateQtyButtonStates('order-fill-amount-input', 'order-fill-amount-minus', 'order-fill-amount-plus', currentOrderContext?.maxAmount || 64);
 });
 document.getElementById('order-fill-amount-plus')?.addEventListener('click', () => {
     if (!currentOrderContext) return;
     const inp = document.getElementById('order-fill-amount-input');
     inp.value = Math.min(currentOrderContext.maxAmount, 64, (parseInt(inp.value) || 1) + 1);
     updateOrderFillTotal();
+    updateQtyButtonStates('order-fill-amount-input', 'order-fill-amount-minus', 'order-fill-amount-plus', currentOrderContext?.maxAmount || 64);
 });
-document.getElementById('order-fill-amount-input')?.addEventListener('input', updateOrderFillTotal);
+document.getElementById('order-fill-amount-input')?.addEventListener('input', () => {
+    updateOrderFillTotal();
+    updateQtyButtonStates('order-fill-amount-input', 'order-fill-amount-minus', 'order-fill-amount-plus', currentOrderContext?.maxAmount || 64);
+});
 
 document.getElementById('order-fill-modal-close')?.addEventListener('click', () => {
-    document.getElementById('order-fill-modal').style.display = 'none';
+    closeModal('order-fill-modal');
 });
 document.getElementById('order-fill-modal-cancel')?.addEventListener('click', () => {
-    document.getElementById('order-fill-modal').style.display = 'none';
+    closeModal('order-fill-modal');
 });
 
 document.getElementById('order-fill-modal-submit')?.addEventListener('click', async () => {
@@ -765,7 +781,7 @@ document.getElementById('order-fill-modal-submit')?.addEventListener('click', as
 
         if (result.success) {
             showToast('success', 'Fulfillment queued... checking your inventory in-game.');
-            document.getElementById('order-fill-modal').style.display = 'none';
+            closeModal('order-fill-modal');
             pollPurchase(result.purchaseId);
         } else {
             showToast('error', result.error || 'Request failed');
@@ -815,11 +831,12 @@ async function loadStocksPage() {
 }
 
 function getSortedStocks() {
-    const sortBy = document.getElementById('stocks-sort').value;
+    const sortBy = currentStocksSort;
     const copy = [...stocksData];
     switch (sortBy) {
         case 'name': copy.sort((a, b) => a.name.localeCompare(b.name)); break;
         case 'buyPrice': copy.sort((a, b) => b.buyPrice - a.buyPrice); break;
+        case 'sellPrice': copy.sort((a, b) => b.sellPrice - a.sellPrice); break;
         case 'change': copy.sort((a, b) => Math.abs(b.change) - Math.abs(a.change)); break;
     }
     return copy;
@@ -1123,4 +1140,80 @@ function escJs(str) {
 function debounce(fn, ms) {
     let timer;
     return (...args) => { clearTimeout(timer); timer = setTimeout(() => fn(...args), ms); };
+}
+
+// ── Modal Close Animation ────────────────────────────────────────
+function closeModal(overlayId) {
+    const overlay = document.getElementById(overlayId);
+    if (!overlay) return;
+    overlay.classList.add('closing');
+    overlay.addEventListener('animationend', () => {
+        overlay.style.display = 'none';
+        overlay.classList.remove('closing');
+    }, { once: true });
+}
+
+// ── Update +/- button disabled states ──────────────────────────
+function updateQtyButtonStates(inputId, minusId, plusId, maxQty) {
+    const val = parseInt(document.getElementById(inputId)?.value) || 1;
+    const minusBtn = document.getElementById(minusId);
+    const plusBtn = document.getElementById(plusId);
+    if (minusBtn) {
+        if (val <= 1) minusBtn.classList.add('at-limit');
+        else minusBtn.classList.remove('at-limit');
+    }
+    if (plusBtn) {
+        if (val >= maxQty) plusBtn.classList.add('at-limit');
+        else plusBtn.classList.remove('at-limit');
+    }
+}
+
+// ── Custom Select Dropdown ──────────────────────────────────────
+let currentStocksSort = 'name';
+
+function initCustomSelects() {
+    document.querySelectorAll('.custom-select').forEach(sel => {
+        const trigger = sel.querySelector('.custom-select-trigger');
+        const options = sel.querySelector('.custom-select-options');
+        const valueSpan = sel.querySelector('.custom-select-value');
+        if (!trigger || !options) return;
+
+        trigger.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const isOpen = trigger.getAttribute('aria-expanded') === 'true';
+            closeAllCustomSelects();
+            if (!isOpen) {
+                trigger.setAttribute('aria-expanded', 'true');
+                options.classList.add('open');
+            }
+        });
+
+        options.querySelectorAll('li').forEach(li => {
+            li.addEventListener('click', () => {
+                const val = li.getAttribute('data-value');
+                const text = li.textContent;
+                valueSpan.textContent = text;
+                options.querySelectorAll('li').forEach(l => l.classList.remove('selected'));
+                li.classList.add('selected');
+                trigger.setAttribute('aria-expanded', 'false');
+                options.classList.remove('open');
+
+                currentStocksSort = val;
+                stocksRenderCount = 50;
+                const q = document.getElementById('stocks-search')?.value?.toLowerCase() || '';
+                const sorted = getSortedStocks();
+                const filtered = q ? sorted.filter(s => s.name.toLowerCase().includes(q)) : sorted;
+                renderStocksBody(filtered);
+            });
+        });
+    });
+
+    document.addEventListener('click', closeAllCustomSelects);
+}
+
+function closeAllCustomSelects() {
+    document.querySelectorAll('.custom-select-trigger[aria-expanded="true"]').forEach(t => {
+        t.setAttribute('aria-expanded', 'false');
+        t.nextElementSibling?.classList.remove('open');
+    });
 }
