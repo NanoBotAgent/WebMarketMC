@@ -7,6 +7,7 @@
  * 
  * Persistence: Astra DB (DataStax) via REST v2 API
  * Caching: In-memory write-through cache for performance
+ * Encryption: AES-256-GCM field-level encryption for sensitive data
  */
 
 const express = require('express');
@@ -27,8 +28,122 @@ const ASTRA_KEYSPACE = process.env.ASTRA_KEYSPACE || 'webmarketmc';
 const ASTRA_BASE = `https://${ASTRA_DB_ID}-${ASTRA_REGION}.apps.astra.datastax.com`;
 const ASTRA_REST = `${ASTRA_BASE}/api/rest/v2/keyspaces/${ASTRA_KEYSPACE}`;
 
+// ── Field-Level Encryption ──────────────────────────────────────
+// AES-256-GCM encryption for sensitive fields stored in Astra DB.
+// If ENCRYPTION_KEY is not set, encryption is disabled (plaintext mode).
+// Encrypted values are prefixed with "enc:" for auto-detection on read.
+// This provides backward compatibility: old plaintext data is read as-is,
+// and new writes are encrypted when the key is available.
+
+const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || '';
+const ENCRYPTION_PREFIX = 'enc:';
+const ALGORITHM = 'aes-256-gcm';
+const IV_LENGTH = 12;    // 96-bit IV for GCM
+const AUTH_TAG_LENGTH = 16; // 128-bit auth tag
+const KEY_LENGTH = 32;   // 256-bit key
+
+let encryptionEnabled = false;
+
+/**
+ * Derive a 32-byte key from the ENCRYPTION_KEY env var.
+ * Accepts either a 64-char hex string or any string (SHA-256 hashed).
+ */
+function deriveKey(rawKey) {
+    if (!rawKey) return null;
+    // If it's a valid 64-char hex string, use it directly
+    if (/^[0-9a-f]{64}$/i.test(rawKey)) {
+        return Buffer.from(rawKey, 'hex');
+    }
+    // Otherwise hash it to get a 32-byte key
+    return crypto.createHash('sha256').update(rawKey).digest();
+}
+
+const derivedKey = deriveKey(ENCRYPTION_KEY);
+if (derivedKey) {
+    encryptionEnabled = true;
+    console.log('[Encryption] AES-256-GCM field-level encryption enabled');
+} else {
+    console.log('[Encryption] No ENCRYPTION_KEY set — running in plaintext mode');
+}
+
+/**
+ * Encrypt a plaintext string using AES-256-GCM.
+ * Returns "enc:<iv>:<ciphertext>:<authTag>" (all base64url).
+ * Returns the original value if encryption is disabled.
+ */
+function encrypt(plaintext) {
+    if (!encryptionEnabled || plaintext === null || plaintext === undefined) {
+        return plaintext;
+    }
+    const str = String(plaintext);
+    const iv = crypto.randomBytes(IV_LENGTH);
+    const cipher = crypto.createCipheriv(ALGORITHM, derivedKey, iv, { authTagLength: AUTH_TAG_LENGTH });
+    let encrypted = cipher.update(str, 'utf8', 'base64url');
+    encrypted += cipher.final('base64url');
+    const authTag = cipher.getAuthTag().toString('base64url');
+    const ivB64 = iv.toString('base64url');
+    return `${ENCRYPTION_PREFIX}${ivB64}:${encrypted}:${authTag}`;
+}
+
+/**
+ * Decrypt a value that was encrypted by encrypt().
+ * Auto-detects encrypted values by the "enc:" prefix.
+ * Returns the original value if it's not encrypted or decryption is disabled.
+ */
+function decrypt(ciphertext) {
+    if (!ciphertext || typeof ciphertext !== 'string' || !ciphertext.startsWith(ENCRYPTION_PREFIX)) {
+        return ciphertext;
+    }
+    if (!encryptionEnabled) {
+        console.warn('[Encryption] Found encrypted value but no key available — returning raw');
+        return ciphertext;
+    }
+    try {
+        const parts = ciphertext.slice(ENCRYPTION_PREFIX.length).split(':');
+        if (parts.length !== 3) {
+            console.error('[Encryption] Malformed encrypted value');
+            return ciphertext;
+        }
+        const [ivB64, encData, authTagB64] = parts;
+        const iv = Buffer.from(ivB64, 'base64url');
+        const authTag = Buffer.from(authTagB64, 'base64url');
+        const decipher = crypto.createDecipheriv(ALGORITHM, derivedKey, iv, { authTagLength: AUTH_TAG_LENGTH });
+        decipher.setAuthTag(authTag);
+        let decrypted = decipher.update(encData, 'base64url', 'utf8');
+        decrypted += decipher.final('utf8');
+        return decrypted;
+    } catch (e) {
+        console.error('[Encryption] Decryption failed:', e.message);
+        return ciphertext;
+    }
+}
+
+/**
+ * Encrypt a JSON object by serializing and encrypting the whole string.
+ * Used for balances_json which contains structured data.
+ */
+function encryptJson(obj) {
+    if (!encryptionEnabled || obj === null || obj === undefined) return obj;
+    return encrypt(JSON.stringify(obj));
+}
+
+/**
+ * Decrypt an encrypted JSON string back to an object.
+ * Falls back to JSON.parse for unencrypted values.
+ */
+function decryptJson(ciphertext) {
+    if (!ciphertext) return {};
+    const decrypted = decrypt(ciphertext);
+    if (typeof decrypted !== 'string' || decrypted.startsWith(ENCRYPTION_PREFIX)) {
+        // Decryption failed or not encrypted — try parsing as-is
+        try { return JSON.parse(ciphertext); } catch { return {}; }
+    }
+    try { return JSON.parse(decrypted); } catch { return {}; }
+}
+
 // ── In-Memory Write-Through Cache ──────────────────────────────
 // These cache Astra DB data for fast reads; writes go to DB first
+// Cache stores DECRYPTED values — encryption only applies to DB storage
 /** @type {Map<string, object>} serverId → server data */
 const serverCache = new Map();
 /** @type {Map<string, object>} token → session data */
@@ -130,7 +245,10 @@ async function loadCacheFromDB() {
         let loaded = 0;
         for (const row of sessionsResp.data.data) {
             if (row.expires > now) {
-                sessionCache.set(row.session_token, deserializeSession(row));
+                const session = deserializeSession(row);
+                // Use decrypted token as cache key
+                const tokenKey = decrypt(row.session_token);
+                sessionCache.set(tokenKey, session);
                 loaded++;
             }
         }
@@ -159,11 +277,15 @@ async function loadCacheFromDB() {
     console.log('[Cache] Ready');
 }
 
-// ── Serialization Helpers ──────────────────────────────────────
+// ── Serialization Helpers (with encryption) ─────────────────────
+// Serialization ENCRYPTS sensitive fields before writing to Astra DB.
+// Deserialization DECRYPTS fields when reading from Astra DB.
+// The in-memory cache always stores plaintext (decrypted) values.
+
 function serializeServer(s) {
     return {
         server_id: s.serverId,
-        api_key: s.apiKey,
+        api_key: encrypt(s.apiKey),
         server_name: s.serverName || 'Minecraft Server',
         last_sync: s.lastSync || Date.now(),
         categories_json: JSON.stringify(s.categories || []),
@@ -181,7 +303,7 @@ function deserializeServer(row) {
     try { items = JSON.parse(row.items_json || '{}'); } catch {}
     return {
         serverId: row.server_id,
-        apiKey: row.api_key,
+        apiKey: decrypt(row.api_key),
         serverName: row.server_name,
         lastSync: row.last_sync,
         categories,
@@ -195,24 +317,22 @@ function deserializeServer(row) {
 
 function serializeSession(token, s) {
     return {
-        session_token: token,
+        session_token: encrypt(token),
         server_id: s.serverId,
-        player_uuid: s.playerUuid,
+        player_uuid: encrypt(s.playerUuid),
         player_name: s.playerName || 'Player',
-        balances_json: JSON.stringify(s.balances || {}),
+        balances_json: encryptJson(s.balances || {}),
         default_currency: s.defaultCurrency || 'Aurels',
         expires: s.expires,
     };
 }
 
 function deserializeSession(row) {
-    let balances = {};
-    try { balances = JSON.parse(row.balances_json || '{}'); } catch {}
     return {
         serverId: row.server_id,
-        playerUuid: row.player_uuid,
+        playerUuid: decrypt(row.player_uuid),
         playerName: row.player_name || 'Player',
-        balances,
+        balances: decryptJson(row.balances_json),
         defaultCurrency: row.default_currency || 'Aurels',
         expires: row.expires,
     };
@@ -222,7 +342,7 @@ function serializePurchase(id, p) {
     return {
         purchase_id: id,
         server_id: p.serverId,
-        player_uuid: p.playerUuid,
+        player_uuid: encrypt(p.playerUuid),
         type: p.type,
         item_key: p.item || p.itemKey || '',
         auction_id: p.auctionId || 0,
@@ -230,16 +350,17 @@ function serializePurchase(id, p) {
         amount: String(p.amount || 0),
         status: p.status,
         created_at: p.createdAt,
-        result_json: p.result ? JSON.stringify(p.result) : '',
+        result_json: p.result ? encrypt(JSON.stringify(p.result)) : '',
     };
 }
 
 function deserializePurchase(row) {
     let result = null;
-    try { result = JSON.parse(row.result_json || 'null'); } catch {}
+    const resultRaw = decrypt(row.result_json || '');
+    try { result = JSON.parse(resultRaw || 'null'); } catch {}
     return {
         serverId: row.server_id,
-        playerUuid: row.player_uuid,
+        playerUuid: decrypt(row.player_uuid),
         type: row.type,
         item: row.item_key,
         itemKey: row.item_key,
@@ -453,6 +574,7 @@ app.post('/api/session', requireApiKey, async (req, res) => {
         expires: Date.now() + 3_600_000,
     };
 
+    // Cache key is the plaintext token — encryption only applies to DB storage
     sessionCache.set(token, session);
 
     if (ASTRA_TOKEN) {
@@ -474,8 +596,8 @@ app.post('/api/session-update', requireApiKey, async (req, res) => {
         if (session.serverId === req.serverId && session.playerUuid === playerUuid) {
             session.balances = balances;
             if (ASTRA_TOKEN) {
-                updates.push(astraUpdate('sessions', token, {
-                    balances_json: JSON.stringify(balances),
+                updates.push(astraUpdate('sessions', encrypt(token), {
+                    balances_json: encryptJson(balances),
                 }).catch(e => console.error('[Astra] Session update failed:', e.message)));
             }
         }
@@ -500,7 +622,7 @@ app.post('/api/confirm-purchase', requireApiKey, async (req, res) => {
     if (ASTRA_TOKEN) {
         astraUpdate('purchases', purchaseId, {
             status: purchase.status,
-            result_json: JSON.stringify(purchase.result),
+            result_json: encrypt(JSON.stringify(purchase.result)),
         }).catch(e => console.error('[Astra] Purchase confirm failed:', e.message));
     }
 
@@ -520,14 +642,14 @@ function requireSession(req, res, next) {
     if (!session) return res.status(401).json({ error: 'Invalid or expired session. Use /web in-game.' });
     if (session.expires < Date.now()) {
         sessionCache.delete(token);
-        if (ASTRA_TOKEN) astraDelete('sessions', token).catch(() => {});
+        if (ASTRA_TOKEN) astraDelete('sessions', encrypt(token)).catch(() => {});
         return res.status(401).json({ error: 'Session expired. Use /web in-game.' });
     }
 
     // Rolling 1-hour timeout
     session.expires = Date.now() + 3_600_000;
     if (ASTRA_TOKEN) {
-        astraUpdate('sessions', token, { expires: session.expires }).catch(() => {});
+        astraUpdate('sessions', encrypt(token), { expires: session.expires }).catch(() => {});
     }
 
     req.session = session;
@@ -841,10 +963,10 @@ setInterval(async () => {
         }
     }
 
-    // Batch delete from Astra
+    // Batch delete from Astra (encrypt session tokens for DB lookup)
     if (ASTRA_TOKEN) {
         for (const token of sessionDeletes) {
-            astraDelete('sessions', token).catch(() => {});
+            astraDelete('sessions', encrypt(token)).catch(() => {});
         }
         for (const id of purchaseDeletes) {
             astraDelete('purchases', id).catch(() => {});
@@ -868,6 +990,7 @@ async function start() {
     app.listen(PORT, () => {
         console.log(`Aurelium Web Dashboard running on port ${PORT}`);
         console.log(`Persistence: ${ASTRA_TOKEN ? 'Astra DB + in-memory cache' : 'in-memory only (no ASTRA_TOKEN)'}`);
+        console.log(`Encryption: ${encryptionEnabled ? 'AES-256-GCM (field-level)' : 'disabled (no ENCRYPTION_KEY)'}`);
     });
 }
 
