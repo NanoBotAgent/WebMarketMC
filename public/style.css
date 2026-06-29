@@ -293,6 +293,11 @@ header {
     display: none;
 }
 
+/* Sidebars are fixed-position so they escape hidden parent - must hide explicitly */
+.page-content.hidden .sidebar {
+    display: none;
+}
+
 .page-header-bar {
     padding: 24px 32px 16px;
     max-width: 1200px;
