@@ -70,27 +70,24 @@ jobs:
         run: |
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://localhost:3000/api/sync \
             -H "Content-Type: application/json" \
-            -H "x-server-id: ci-test-server" \
             -H "x-api-key: wrong-key" \
-            -d '{}')
+            -d '{"serverId":"ci-test-server"}')
           [ "$STATUS" = "403" ] || { echo "Sync with wrong key returned $STATUS (expected 403)"; exit 1; }
 
       - name: Test sync (correct key = 200)
         run: |
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://localhost:3000/api/sync \
             -H "Content-Type: application/json" \
-            -H "x-server-id: ci-test-server" \
             -H "x-api-key: ci-test-key" \
-            -d '{"categories":[{"id":"blocks","name":"Blocks","icon":"stone","itemCount":1}],"items":{"blocks":[{"key":"stone","name":"Stone","price":10}]}}')
+            -d '{"serverId":"ci-test-server","categories":[{"id":"blocks","name":"Blocks","icon":"stone","itemCount":1}],"items":{"blocks":[{"key":"stone","name":"Stone","price":10}]}}')
           [ "$STATUS" = "200" ] || { echo "Sync with correct key returned $STATUS (expected 200)"; exit 1; }
 
       - name: Test session (correct key = 200)
         run: |
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://localhost:3000/api/session \
             -H "Content-Type: application/json" \
-            -H "x-server-id: ci-test-server" \
             -H "x-api-key: ci-test-key" \
-            -d '{"token":"ci-session-token","playerUuid":"00000000-0000-0000-0000-000000000001","playerName":"TestPlayer","balances":{"Aurels":1000}}')
+            -d '{"serverId":"ci-test-server","token":"ci-session-token","playerUuid":"00000000-0000-0000-0000-000000000001","playerName":"TestPlayer","balances":{"Aurels":1000}}')
           [ "$STATUS" = "200" ] || { echo "Session create returned $STATUS (expected 200)"; exit 1; }
 
       - name: Test player endpoint (with session = 200)
