@@ -146,3 +146,75 @@ jobs:
       - name: Kill server
         if: always()
         run: kill $SERVER_PID 2>/dev/null || true
+
+  encryption-test:
+    name: Encryption Test
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Start server with encryption key
+        run: |
+          PORT=3001 REGISTRATION_SECRET="test-secret" ENCRYPTION_KEY="ci-test-encryption-key-32bytes!!" node server.js &
+          SERVER_PID=$!
+          echo "SERVER_PID=$SERVER_PID" >> $GITHUB_ENV
+
+      - name: Wait for server to start
+        run: |
+          for i in $(seq 1 10); do
+            if curl -sf http://localhost:3001/ > /dev/null 2>&1; then
+              echo "Server is up with encryption"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Server failed to start"
+          exit 1
+
+      - name: Test register with encryption
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://localhost:3001/api/register \
+            -H "Content-Type: application/json" \
+            -H "x-registration-secret: test-secret" \
+            -d '{"serverId":"enc-test-server","apiKey":"enc-test-key","serverName":"Enc Test Server"}')
+          [ "$STATUS" = "200" ] || { echo "Register with encryption returned $STATUS"; exit 1; }
+
+      - name: Test session with encryption
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://localhost:3001/api/session \
+            -H "Content-Type: application/json" \
+            -H "x-api-key: enc-test-key" \
+            -d '{"serverId":"enc-test-server","token":"enc-session-token","playerUuid":"11111111-1111-1111-1111-111111111111","playerName":"EncPlayer","balances":{"Aurels":500}}')
+          [ "$STATUS" = "200" ] || { echo "Session with encryption returned $STATUS"; exit 1; }
+
+      - name: Test player data roundtrip with encryption
+        run: |
+          BODY=$(curl -s http://localhost:3001/api/enc-test-server/player \
+            -H "Authorization: Bearer enc-session-token")
+          echo "Player response: $BODY"
+          echo "$BODY" | grep -q "EncPlayer" || { echo "Player name not found in response"; exit 1; }
+          echo "$BODY" | grep -q "11111111-1111-1111-1111-111111111111" || { echo "Player UUID not found in response"; exit 1; }
+
+      - name: Test buy with encryption
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://localhost:3001/api/enc-test-server/buy \
+            -H "Authorization: Bearer enc-session-token" \
+            -H "Content-Type: application/json" \
+            -d '{"item":"diamond","amount":5}')
+          [ "$STATUS" = "200" ] || { echo "Buy with encryption returned $STATUS"; exit 1; }
+
+      - name: Kill server
+        if: always()
+        run: kill $SERVER_PID 2>/dev/null || true
