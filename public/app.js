@@ -224,7 +224,13 @@ async function refreshCurrentPage() {
             case 'auction': {
                 const auctions = await api('/auctions');
                 if (!auctions) break;
-                renderAuctions(auctions);
+                auctionData = auctions;
+                if (currentAuctionCategory) {
+                    const filtered = auctions.filter(a => a.categoryId === currentAuctionCategory);
+                    renderAuctions(filtered.length > 0 ? filtered : auctions);
+                } else {
+                    renderAuctions(auctions);
+                }
                 break;
             }
             case 'orders': {
@@ -475,22 +481,68 @@ async function pollPurchase(purchaseId) {
 // ═══════════════════════════════════════════════════════════════════
 
 let auctionData = [];
+let currentAuctionCategory = null;
 
 async function loadAuctionPage() {
     try {
-        auctionData = await api('/auctions');
-        renderAuctions(auctionData);
+        const [auctions, cats] = await Promise.all([
+            api('/auctions'),
+            api('/categories')
+        ]);
+        if (!auctions) return;
+        auctionData = auctions;
+        if (cats && cats.length > 0) {
+            renderAuctionCategories(cats);
+            selectAuctionCategory(cats[0].id, cats[0].name);
+        } else {
+            renderAuctions(auctionData);
+        }
     } catch (e) {
         console.error('Failed to load auctions:', e);
     }
 
     document.getElementById('auction-search').onkeyup = debounce(() => {
         const q = document.getElementById('auction-search').value.toLowerCase();
+        currentAuctionCategory = null;
+        document.querySelectorAll('#auction-sidebar-categories .sidebar-item').forEach(s => s.classList.remove('active'));
         const filtered = auctionData.filter(a =>
             a.itemName.toLowerCase().includes(q) || a.seller.toLowerCase().includes(q)
         );
         renderAuctions(filtered);
     }, 200);
+}
+
+function renderAuctionCategories(cats) {
+    const container = document.getElementById('auction-sidebar-categories');
+    if (!container) return;
+    container.innerHTML = '';
+    cats.forEach(cat => {
+        const el = document.createElement('div');
+        el.className = 'sidebar-item';
+        el.dataset.catId = cat.id;
+        el.innerHTML = `
+            <img src="${IMG_BASE}${cat.icon?.toLowerCase() || 'stone'}" width="20" height="20"
+                 style="image-rendering:pixelated" onerror="this.style.display='none'">
+            <span>${esc(cat.name)}</span>
+            <span class="item-count">${cat.itemCount}</span>
+        `;
+        el.addEventListener('click', () => selectAuctionCategory(cat.id, cat.name));
+        container.appendChild(el);
+    });
+}
+
+function selectAuctionCategory(catId, catName) {
+    currentAuctionCategory = catId;
+    document.getElementById('auction-search').value = '';
+
+    document.querySelectorAll('#auction-sidebar-categories .sidebar-item').forEach(s => {
+        s.classList.toggle('active', s.dataset.catId === catId);
+    });
+
+    const filtered = currentAuctionCategory
+        ? auctionData.filter(a => a.categoryId === currentAuctionCategory || a.category === catName)
+        : auctionData;
+    renderAuctions(filtered.length > 0 ? filtered : auctionData);
 }
 
 function renderAuctions(auctions) {

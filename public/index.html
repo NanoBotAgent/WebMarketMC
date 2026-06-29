@@ -142,36 +142,44 @@
 
     <!-- ═══════ PAGE: AUCTION ═══════ -->
     <div class="page-content hidden" id="page-auction">
-        <div class="page-header-bar">
-            <h2>
-                <svg class="icon" style="width:24px;height:24px;margin-bottom:-4px;margin-right:8px;color:var(--blue)"
-                    viewBox="0 0 24 24">
-                    <path d="M12 2H2v10l9.29 9.29c.94.94 2.48.94 3.42 0l6.58-6.58c.94-.94.94-2.48 0-3.42L12 2Z" />
-                    <path d="M7 7h.01" />
-                </svg>
-                Auction House
-            </h2>
-            <p class="page-subtitle">Browse active auctions — bid or buy in-game</p>
-        </div>
-        <div class="auction-controls">
-            <div class="auction-search-bar">
-                <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <circle cx="11" cy="11" r="8" />
-                    <path d="m21 21-4.35-4.35" />
-                </svg>
-                <input type="text" id="auction-search" placeholder="Search auctions..." autocomplete="off">
-            </div>
-        </div>
-        <div class="auction-grid" id="auction-grid"></div>
-        <div class="empty-state" id="auction-empty" style="display:none;">
-            <div class="empty-icon">
-                <svg class="icon icon-lg" viewBox="0 0 24 24">
-                    <path d="M12 2H2v10l9.29 9.29c.94.94 2.48.94 3.42 0l6.58-6.58c.94-.94.94-2.48 0-3.42L12 2Z" />
-                    <path d="M7 7h.01" />
-                </svg>
-            </div>
-            <h3>No active auctions</h3>
-            <p>Check back later or list items in-game.</p>
+        <div class="layout">
+            <nav class="sidebar" id="auction-sidebar">
+                <div class="sidebar-header">Categories</div>
+                <div class="sidebar-items" id="auction-sidebar-categories"></div>
+            </nav>
+            <main class="content">
+                <div class="page-header-bar" style="padding:0 0 16px;">
+                    <h2>
+                        <svg class="icon" style="width:24px;height:24px;margin-bottom:-4px;margin-right:8px;color:var(--blue)"
+                            viewBox="0 0 24 24">
+                            <path d="M12 2H2v10l9.29 9.29c.94.94 2.48.94 3.42 0l6.58-6.58c.94-.94.94-2.48 0-3.42L12 2Z" />
+                            <path d="M7 7h.01" />
+                        </svg>
+                        Auction House
+                    </h2>
+                    <p class="page-subtitle">Browse active auctions — bid or buy in-game</p>
+                </div>
+                <div class="auction-controls">
+                    <div class="auction-search-bar">
+                        <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="11" cy="11" r="8" />
+                            <path d="m21 21-4.35-4.35" />
+                        </svg>
+                        <input type="text" id="auction-search" placeholder="Search auctions..." autocomplete="off">
+                    </div>
+                </div>
+                <div class="auction-grid" id="auction-grid"></div>
+                <div class="empty-state" id="auction-empty" style="display:none;">
+                    <div class="empty-icon">
+                        <svg class="icon icon-lg" viewBox="0 0 24 24">
+                            <path d="M12 2H2v10l9.29 9.29c.94.94 2.48.94 3.42 0l6.58-6.58c.94-.94.94-2.48 0-3.42L12 2Z" />
+                            <path d="M7 7h.01" />
+                        </svg>
+                    </div>
+                    <h3>No active auctions</h3>
+                    <p>Check back later or list items in-game.</p>
+                </div>
+            </main>
         </div>
     </div>
 
