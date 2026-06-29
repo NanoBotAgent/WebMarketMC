@@ -616,9 +616,7 @@ header {
 .auction-controls {
     display: flex;
     gap: 12px;
-    padding: 0 32px 16px;
-    max-width: 1200px;
-    margin: 0 auto;
+    padding: 0 0 16px;
 }
 
 .auction-search-bar {
@@ -631,9 +629,6 @@ header {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
     gap: 16px;
-    padding: 0 32px;
-    max-width: 1200px;
-    margin: 0 auto;
 }
 
 .auction-card {
@@ -770,9 +765,7 @@ header {
    ═══════════════════════════════════════════════════════════════════ */
 
 .orders-table-wrap {
-    padding: 0 32px;
-    max-width: 1200px;
-    margin: 0 auto;
+    padding: 0;
     overflow-x: auto;
 }
 
@@ -886,9 +879,7 @@ header {
 .stocks-controls {
     display: flex;
     gap: 12px;
-    padding: 0 32px 16px;
-    max-width: 1200px;
-    margin: 0 auto;
+    padding: 0 0 16px;
 }
 
 .stocks-controls input {
@@ -1025,9 +1016,7 @@ header {
 }
 
 .stocks-table-wrap {
-    padding: 0 32px;
-    max-width: 1200px;
-    margin: 0 auto;
+    padding: 0;
     overflow-x: auto;
 }
 
