@@ -373,6 +373,12 @@ header {
     border-radius: 10px;
 }
 
+.sidebar-separator {
+    height: 1px;
+    background: var(--border);
+    margin: 8px 12px;
+}
+
 /* ── Content ─────────────────────────────────────────────────────── */
 
 .content {

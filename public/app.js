@@ -225,8 +225,16 @@ async function refreshCurrentPage() {
                 const auctions = await api('/auctions');
                 if (!auctions) break;
                 auctionData = auctions;
+                // Re-render category counts
+                const cats = await api('/categories');
+                if (cats) renderAuctionCategories(cats);
+                // Re-apply current filter
                 if (currentAuctionCategory) {
-                    const filtered = auctions.filter(a => a.categoryId === currentAuctionCategory);
+                    let filtered;
+                    if (currentAuctionCategory === '__all') filtered = auctions;
+                    else if (currentAuctionCategory === '__bin') filtered = auctions.filter(a => a.isBin);
+                    else if (currentAuctionCategory === '__bid') filtered = auctions.filter(a => !a.isBin);
+                    else filtered = auctions.filter(a => a.categoryId === currentAuctionCategory || a.category === '');
                     renderAuctions(filtered.length > 0 ? filtered : auctions);
                 } else {
                     renderAuctions(auctions);
@@ -493,7 +501,7 @@ async function loadAuctionPage() {
         auctionData = auctions;
         if (cats && cats.length > 0) {
             renderAuctionCategories(cats);
-            selectAuctionCategory(cats[0].id, cats[0].name);
+            selectAuctionCategory('__all', 'All Listings');
         } else {
             renderAuctions(auctionData);
         }
@@ -516,6 +524,33 @@ function renderAuctionCategories(cats) {
     const container = document.getElementById('auction-sidebar-categories');
     if (!container) return;
     container.innerHTML = '';
+
+    // Special auction-type filters
+    const specialFilters = [
+        { id: '__all', name: 'All Listings', icon: null, count: auctionData.length },
+        { id: '__bin', name: 'BIN Listings', icon: null, count: auctionData.filter(a => a.isBin).length },
+        { id: '__bid', name: 'BID Listings', icon: null, count: auctionData.filter(a => !a.isBin).length },
+    ];
+
+    specialFilters.forEach(f => {
+        const el = document.createElement('div');
+        el.className = 'sidebar-item';
+        el.dataset.catId = f.id;
+        el.dataset.special = 'true';
+        el.innerHTML = `
+            <span style="font-weight:600;color:var(--text-primary)">${esc(f.name)}</span>
+            <span class="item-count">${f.count}</span>
+        `;
+        el.addEventListener('click', () => selectAuctionCategory(f.id, f.name));
+        container.appendChild(el);
+    });
+
+    // Separator
+    const sep = document.createElement('div');
+    sep.className = 'sidebar-separator';
+    container.appendChild(sep);
+
+    // Item categories
     cats.forEach(cat => {
         const el = document.createElement('div');
         el.className = 'sidebar-item';
@@ -539,9 +574,16 @@ function selectAuctionCategory(catId, catName) {
         s.classList.toggle('active', s.dataset.catId === catId);
     });
 
-    const filtered = currentAuctionCategory
-        ? auctionData.filter(a => a.categoryId === currentAuctionCategory || a.category === catName)
-        : auctionData;
+    let filtered;
+    if (catId === '__all') {
+        filtered = auctionData;
+    } else if (catId === '__bin') {
+        filtered = auctionData.filter(a => a.isBin);
+    } else if (catId === '__bid') {
+        filtered = auctionData.filter(a => !a.isBin);
+    } else {
+        filtered = auctionData.filter(a => a.categoryId === catId || a.category === catName);
+    }
     renderAuctions(filtered.length > 0 ? filtered : auctionData);
 }
 
