@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Node.js Server Test
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Syntax check
+        run: node --check server.js
+
+      - name: Start server with mock env
+        run: |
+          ASTRA_TOKEN="mock-token-for-testing" \
+          ASTRA_DB_ID="test-db-id" \
+          ASTRA_REGION="us-east-2" \
+          ASTRA_KEYSPACE="webmarketmc" \
+          REGISTRATION_SECRET="test-secret" \
+          PORT=3000 \
+          node server.js &
+        env:
+          ASTRA_TOKEN: "mock-token-for-testing"
+          ASTRA_DB_ID: "test-db-id"
+          ASTRA_REGION: "us-east-2"
+          ASTRA_KEYSPACE: "webmarketmc"
+          REGISTRATION_SECRET: "test-secret"
+          PORT: 3000
+
+      - name: Wait for server to start
+        run: sleep 3
+
+      - name: Test health endpoint
+        run: |
+          curl -f http://localhost:3000/ || exit 1
+
+      - name: Test API endpoints (expect 401 without auth)
+        run: |
+          # Test register endpoint (should fail without secret)
+          curl -f -X POST http://localhost:3000/api/register \
+            -H "Content-Type: application/json" \
+            -d '{"serverId":"test","apiKey":"test"}' \
+            -w "\nHTTP %{http_code}\n" | grep -q "403" || exit 1
+
+          # Test sync endpoint (should fail without auth)
+          curl -f -X POST http://localhost:3000/api/sync \
+            -H "Content-Type: application/json" \
+            -H "x-api-key: wrong" \
+            -d '{}' \
+            -w "\nHTTP %{http_code}\n" | grep -q "403" || exit 1
+
+          # Test player endpoint (should fail without session)
+          curl -f http://localhost:3000/api/test/player \
+            -w "\nHTTP %{http_code}\n" | grep -q "401" || exit 1
+
+      - name: Kill server
+        run: pkill -f "node server.js" || true
+
+      - name: Verify server stopped
+        run: sleep 1 && ! curl -f http://localhost:3000/ 2>/dev/null || exit 1
