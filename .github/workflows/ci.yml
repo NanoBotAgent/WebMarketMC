@@ -28,51 +28,124 @@ jobs:
       - name: Syntax check
         run: node --check server.js
 
-      - name: Start server with mock env
+      - name: Start server (in-memory mode, no Astra)
         run: |
-          ASTRA_TOKEN="mock-token-for-testing" \
-          ASTRA_DB_ID="test-db-id" \
-          ASTRA_REGION="us-east-2" \
-          ASTRA_KEYSPACE="webmarketmc" \
-          REGISTRATION_SECRET="test-secret" \
-          PORT=3000 \
-          node server.js &
-        env:
-          ASTRA_TOKEN: "mock-token-for-testing"
-          ASTRA_DB_ID: "test-db-id"
-          ASTRA_REGION: "us-east-2"
-          ASTRA_KEYSPACE: "webmarketmc"
-          REGISTRATION_SECRET: "test-secret"
-          PORT: 3000
+          PORT=3000 REGISTRATION_SECRET="test-secret" node server.js &
+          SERVER_PID=$!
+          echo "SERVER_PID=$SERVER_PID" >> $GITHUB_ENV
 
       - name: Wait for server to start
-        run: sleep 3
-
-      - name: Test health endpoint
         run: |
-          curl -f http://localhost:3000/ || exit 1
+          for i in $(seq 1 10); do
+            if curl -sf http://localhost:3000/ > /dev/null 2>&1; then
+              echo "Server is up"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Server failed to start"
+          exit 1
 
-      - name: Test API endpoints (expect 401 without auth)
+      - name: Test landing page
         run: |
-          # Test register endpoint (should fail without secret)
-          curl -f -X POST http://localhost:3000/api/register \
-            -H "Content-Type: application/json" \
-            -d '{"serverId":"test","apiKey":"test"}' \
-            -w "\nHTTP %{http_code}\n" | grep -q "403" || exit 1
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/)
+          [ "$STATUS" = "200" ] || { echo "Landing page returned $STATUS"; exit 1; }
 
-          # Test sync endpoint (should fail without auth)
-          curl -f -X POST http://localhost:3000/api/sync \
+      - name: Test register (no secret = 403)
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://localhost:3000/api/register \
             -H "Content-Type: application/json" \
-            -H "x-api-key: wrong" \
-            -d '{}' \
-            -w "\nHTTP %{http_code}\n" | grep -q "403" || exit 1
+            -d '{"serverId":"test","apiKey":"test"}')
+          [ "$STATUS" = "403" ] || { echo "Register without secret returned $STATUS (expected 403)"; exit 1; }
 
-          # Test player endpoint (should fail without session)
-          curl -f http://localhost:3000/api/test/player \
-            -w "\nHTTP %{http_code}\n" | grep -q "401" || exit 1
+      - name: Test register (with secret = 200)
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://localhost:3000/api/register \
+            -H "Content-Type: application/json" \
+            -H "x-registration-secret: test-secret" \
+            -d '{"serverId":"ci-test-server","apiKey":"ci-test-key","serverName":"CI Test Server"}')
+          [ "$STATUS" = "200" ] || { echo "Register with secret returned $STATUS (expected 200)"; exit 1; }
+
+      - name: Test sync (wrong key = 403)
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://localhost:3000/api/sync \
+            -H "Content-Type: application/json" \
+            -H "x-server-id: ci-test-server" \
+            -H "x-api-key: wrong-key" \
+            -d '{}')
+          [ "$STATUS" = "403" ] || { echo "Sync with wrong key returned $STATUS (expected 403)"; exit 1; }
+
+      - name: Test sync (correct key = 200)
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://localhost:3000/api/sync \
+            -H "Content-Type: application/json" \
+            -H "x-server-id: ci-test-server" \
+            -H "x-api-key: ci-test-key" \
+            -d '{"categories":[{"id":"blocks","name":"Blocks","icon":"stone","itemCount":1}],"items":{"blocks":[{"key":"stone","name":"Stone","price":10}]}}')
+          [ "$STATUS" = "200" ] || { echo "Sync with correct key returned $STATUS (expected 200)"; exit 1; }
+
+      - name: Test session (correct key = 200)
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://localhost:3000/api/session \
+            -H "Content-Type: application/json" \
+            -H "x-server-id: ci-test-server" \
+            -H "x-api-key: ci-test-key" \
+            -d '{"token":"ci-session-token","playerUuid":"00000000-0000-0000-0000-000000000001","playerName":"TestPlayer","balances":{"Aurels":1000}}')
+          [ "$STATUS" = "200" ] || { echo "Session create returned $STATUS (expected 200)"; exit 1; }
+
+      - name: Test player endpoint (with session = 200)
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/api/ci-test-server/player \
+            -H "Authorization: Bearer ci-session-token")
+          [ "$STATUS" = "200" ] || { echo "Player endpoint returned $STATUS (expected 200)"; exit 1; }
+
+      - name: Test categories (with session = 200)
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/api/ci-test-server/categories \
+            -H "Authorization: Bearer ci-session-token")
+          [ "$STATUS" = "200" ] || { echo "Categories returned $STATUS (expected 200)"; exit 1; }
+
+      - name: Test items (with session = 200)
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:3000/api/ci-test-server/items?category=blocks&page=0" \
+            -H "Authorization: Bearer ci-session-token")
+          [ "$STATUS" = "200" ] || { echo "Items returned $STATUS (expected 200)"; exit 1; }
+
+      - name: Test buy (with session = 200)
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://localhost:3000/api/ci-test-server/buy \
+            -H "Authorization: Bearer ci-session-token" \
+            -H "Content-Type: application/json" \
+            -d '{"item":"stone","amount":1}')
+          [ "$STATUS" = "200" ] || { echo "Buy returned $STATUS (expected 200)"; exit 1; }
+
+      - name: Test bid (with session = 200)
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://localhost:3000/api/ci-test-server/bid \
+            -H "Authorization: Bearer ci-session-token" \
+            -H "Content-Type: application/json" \
+            -d '{"auctionId":1,"amount":50}')
+          [ "$STATUS" = "200" ] || { echo "Bid returned $STATUS (expected 200)"; exit 1; }
+
+      - name: Test fill-order (with session = 200)
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://localhost:3000/api/ci-test-server/fill-order \
+            -H "Authorization: Bearer ci-session-token" \
+            -H "Content-Type: application/json" \
+            -d '{"orderId":1,"amount":5}')
+          [ "$STATUS" = "200" ] || { echo "Fill order returned $STATUS (expected 200)"; exit 1; }
+
+      - name: Test unauthenticated access (no token = 401)
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/api/ci-test-server/player)
+          [ "$STATUS" = "401" ] || { echo "Unauth player returned $STATUS (expected 401)"; exit 1; }
+
+      - name: Test invalid session (bad token = 401)
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/api/ci-test-server/player \
+            -H "Authorization: Bearer bad-token")
+          [ "$STATUS" = "401" ] || { echo "Bad session returned $STATUS (expected 401)"; exit 1; }
 
       - name: Kill server
-        run: pkill -f "node server.js" || true
-
-      - name: Verify server stopped
-        run: sleep 1 && ! curl -f http://localhost:3000/ 2>/dev/null || exit 1
+        if: always()
+        run: kill $SERVER_PID 2>/dev/null || true
