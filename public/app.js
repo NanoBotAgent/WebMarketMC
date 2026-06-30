@@ -22,22 +22,55 @@ let refreshCountdown = 20;
 
 const AUTH_HEADERS = () => ({ 'Authorization': `Bearer ${TOKEN}` });
 
-const IMG_BASE = 'https://api.minecraftitems.xyz/api/item/';
-const IMG_FALLBACKS = [
-    'https://assets.mcasset.cloud/1.21.11/assets/minecraft/textures/item/',
-    'https://assets.mcasset.cloud/1.21.11/assets/minecraft/textures/block/',
-    'https://assets.mcasset.cloud/1.20.4/assets/minecraft/textures/item/',
-    'https://assets.mcasset.cloud/1.20.4/assets/minecraft/textures/block/',
-    'https://assets.mcasset.cloud/1.19.4/assets/minecraft/textures/item/',
-    'https://assets.mcasset.cloud/1.19.4/assets/minecraft/textures/block/',
-    'https://assets.mcasset.cloud/1.18.2/assets/minecraft/textures/item/',
-    'https://assets.mcasset.cloud/1.18.2/assets/minecraft/textures/block/'
-];
+const IMG_BASE = 'https://assets.mcasset.cloud/26.2/assets/minecraft/textures/item/';
+
+// Items whose texture filename differs from their item ID
+const TEXTURE_OVERRIDES = {
+    'enchanted_golden_apple': 'golden_apple',
+    'crossbow': 'crossbow_standby',
+    'debug_stick': 'stick',
+    'clock': 'clock_00',
+    'compass': 'compass_00',
+    'recovery_compass': 'recovery_compass_00',
+    'shulker_box': 'block/shulker_box',
+    'piston': 'block/piston_side',
+    'observer': 'block/observer_front',
+};
+
+function resolveTextureName(material) {
+    const key = (material || '').toLowerCase();
+    const override = TEXTURE_OVERRIDES[key];
+    if (override) {
+        if (override.startsWith('block/')) return override;
+        return override;
+    }
+    return key;
+}
+
+function getItemIconUrl(material) {
+    const resolved = resolveTextureName(material);
+    if (resolved.startsWith('block/')) {
+        return `https://assets.mcasset.cloud/26.2/assets/minecraft/textures/${resolved}.png`;
+    }
+    return `${IMG_BASE}${resolved}.png`;
+}
 
 function handleItemIconError(img, material, hideOnFail = false) {
     let attempt = parseInt(img.dataset.fallback || '0');
-    if (attempt < IMG_FALLBACKS.length) {
-        img.src = `${IMG_FALLBACKS[attempt]}${material.toLowerCase()}.png`;
+    if (attempt < 1) {
+        img.src = `https://assets.mcasset.cloud/26.2/assets/minecraft/textures/block/${resolveTextureName(material)}.png`;
+        img.dataset.fallback = attempt + 1;
+    } else if (attempt < 2) {
+        img.src = `https://assets.mcasset.cloud/26.1/assets/minecraft/textures/item/${resolveTextureName(material)}.png`;
+        img.dataset.fallback = attempt + 1;
+    } else if (attempt < 3) {
+        img.src = `https://assets.mcasset.cloud/26.1/assets/minecraft/textures/block/${resolveTextureName(material)}.png`;
+        img.dataset.fallback = attempt + 1;
+    } else if (attempt < 4) {
+        img.src = `https://assets.mcasset.cloud/1.21.11/assets/minecraft/textures/item/${resolveTextureName(material)}.png`;
+        img.dataset.fallback = attempt + 1;
+    } else if (attempt < 5) {
+        img.src = `https://assets.mcasset.cloud/1.21.11/assets/minecraft/textures/block/${resolveTextureName(material)}.png`;
         img.dataset.fallback = attempt + 1;
     } else {
         if (hideOnFail) {
@@ -300,7 +333,7 @@ function renderCategories(cats) {
         el.className = 'sidebar-item';
         el.dataset.catId = cat.id;
         el.innerHTML = `
-            <img src="${IMG_BASE}${cat.icon?.toLowerCase() || 'stone'}" width="20" height="20"
+            <img src="${getItemIconUrl(cat.icon || 'stone')}" width="20" height="20"
                  style="image-rendering:pixelated" onerror="this.style.display='none'">
             <span>${esc(cat.name)}</span>
             <span class="item-count">${cat.itemCount}</span>
@@ -353,7 +386,7 @@ function renderItems(items) {
         <div class="item-card" onclick="openBuyModal('${escJs(item.key)}','${escJs(item.name)}',${item.price},'${escJs(item.priceFormatted)}','${escJs(item.currency)}','${escJs(item.material)}')">
             <div class="item-card-header">
                 <div class="item-icon">
-                    <img src="${IMG_BASE}${item.material?.toLowerCase() || 'stone'}"
+                    <img src="${getItemIconUrl(item.material || 'stone')}"
                          onerror="handleItemIconError(this, '${escJs(item.material || 'stone')}')" alt="">
                 </div>
                 <div class="item-name">${esc(item.name)}</div>
@@ -393,7 +426,7 @@ function openBuyModal(key, name, price, formatted, currency, material, maxQty = 
     document.getElementById('modal-item-name').textContent = name;
     document.getElementById('modal-item-price').textContent = formatted;
     document.getElementById('modal-icon').innerHTML =
-        `<img src="${IMG_BASE}${material?.toLowerCase() || 'stone'}" width="36" height="36" style="image-rendering:pixelated"
+        `<img src="${getItemIconUrl(material || 'stone')}" width="36" height="36" style="image-rendering:pixelated"
               onerror="handleItemIconError(this, '${escJs(material || 'stone')}')">`;
     document.getElementById('amount-input').value = 1;
     document.getElementById('amount-input').max = maxQty;
@@ -556,7 +589,7 @@ function renderAuctionCategories(cats) {
         el.className = 'sidebar-item';
         el.dataset.catId = cat.id;
         el.innerHTML = `
-            <img src="${IMG_BASE}${cat.icon?.toLowerCase() || 'stone'}" width="20" height="20"
+            <img src="${getItemIconUrl(cat.icon || 'stone')}" width="20" height="20"
                  style="image-rendering:pixelated" onerror="this.style.display='none'">
             <span>${esc(cat.name)}</span>
             <span class="item-count">${cat.itemCount}</span>
@@ -584,19 +617,32 @@ function selectAuctionCategory(catId, catName) {
     } else {
         filtered = auctionData.filter(a => a.categoryId === catId || a.category === catName);
     }
-    renderAuctions(filtered.length > 0 ? filtered : auctionData);
+    renderAuctions(filtered, catName);
 }
 
-function renderAuctions(auctions) {
+function renderAuctions(auctions, categoryName) {
     const grid = document.getElementById('auction-grid');
     const empty = document.getElementById('auction-empty');
+    const emptyTitle = document.getElementById('auction-empty-title');
+    const emptySub = document.getElementById('auction-empty-sub');
 
     if (!auctions || auctions.length === 0) {
         grid.innerHTML = '';
+        if (categoryName) {
+            emptyTitle.textContent = `No auctions in ${categoryName}`;
+            emptySub.textContent = 'No items are currently listed in this category. Check back later!';
+        } else {
+            emptyTitle.textContent = 'No active auctions';
+            emptySub.textContent = 'Check back later or list items in-game.';
+        }
         empty.style.display = '';
+        empty.classList.remove('fade-in');
+        void empty.offsetWidth;
+        empty.classList.add('fade-in');
         return;
     }
     empty.style.display = 'none';
+    empty.classList.remove('fade-in');
 
     grid.innerHTML = auctions.map(a => {
         const now = Date.now();
@@ -610,7 +656,7 @@ function renderAuctions(auctions) {
             <div class="auction-tag ${a.isBin ? 'bin' : 'bid'}">${a.isBin ? 'BIN' : 'BID'}</div>
             <div class="auction-card-header">
                 <div class="auction-item-icon">
-                    <img src="${IMG_BASE}${a.material?.toLowerCase() || 'stone'}"
+                    <img src="${getItemIconUrl(a.material || 'stone')}"
                          onerror="handleItemIconError(this, '${escJs(a.material || 'stone')}')" alt="">
                 </div>
                 <div class="auction-item-info">
@@ -663,11 +709,11 @@ function openAuctionModal(id, isBin, name, material, price, currencyStr) {
     document.getElementById('auction-modal-item-name').textContent = name;
     document.getElementById('auction-modal-item-price').textContent = isBin ? `Price: ${currencyStr}${price.toLocaleString()}` : `Current: ${currencyStr}${price.toLocaleString()}`;
 
-    // Update label: BIN shows "Price", BID shows "Your Bid"
-    document.getElementById('auction-amount-label').textContent = isBin ? 'Price' : 'Your Bid';
+    // Update label: BIN shows "Price (per item)", BID shows "Your Bid (per item)"
+    document.getElementById('auction-amount-label').textContent = isBin ? 'Price (per item)' : 'Your Bid (per item)';
 
     const iconEl = document.getElementById('auction-modal-icon');
-    iconEl.innerHTML = `<img src="${IMG_BASE}${escJs(material)}" onerror="handleItemIconError(this, '${escJs(material)}', true)">`;
+    iconEl.innerHTML = `<img src="${getItemIconUrl(material)}" onerror="handleItemIconError(this, '${escJs(material)}', true)">`;
 
     const input = document.getElementById('auction-amount-input');
     if (isBin) {
@@ -768,7 +814,7 @@ function renderOrders(orders) {
         <tr>
             <td>
                 <div class="order-item-cell">
-                    <img class="order-item-icon" src="${IMG_BASE}${o.material?.toLowerCase() || 'stone'}"
+                    <img class="order-item-icon" src="${getItemIconUrl(o.material || 'stone')}"
                          loading="lazy" onerror="handleItemIconError(this, '${escJs(o.material || 'stone')}', true)" alt="">
                     <span class="order-item-name">${esc(o.itemName)}</span>
                 </div>
@@ -804,7 +850,7 @@ function openOrderFillModal(id, name, material, price, currencyStr, maxAmount) {
     document.getElementById('order-fill-modal-item-price').textContent = `Payout: ${currencyStr}${price.toLocaleString()} each`;
 
     const iconEl = document.getElementById('order-fill-modal-icon');
-    iconEl.innerHTML = `<img src="${IMG_BASE}${escJs(material)}" onerror="handleItemIconError(this, '${escJs(material)}', true)">`;
+    iconEl.innerHTML = `<img src="${getItemIconUrl(material)}" onerror="handleItemIconError(this, '${escJs(material)}', true)">`;
 
     const input = document.getElementById('order-fill-amount-input');
     input.value = 1;
@@ -963,7 +1009,7 @@ function renderStocksBody(stocks, isAppend = false) {
         <tr onclick="openStockChart('${escJs(s.key)}','${escJs(s.name)}','${escJs(s.material)}',${s.buyPrice},${s.sellPrice},${s.change},'${escJs(s.currencySymbol)}')">
             <td>
                 <div class="stock-item-cell">
-                    <img class="stock-item-icon" src="${IMG_BASE}${s.material?.toLowerCase() || 'stone'}"
+                    <img class="stock-item-icon" src="${getItemIconUrl(s.material || 'stone')}"
                          loading="lazy" onerror="handleItemIconError(this, '${escJs(s.material || 'stone')}', true)" alt="">
                     <span>${esc(s.name)}</span>
                 </div>
@@ -1011,7 +1057,7 @@ function openStockChart(key, name, material, buyPrice, sellPrice, change, curren
         <div class="chart-modal">
             <div class="chart-modal-header">
                 <h3>
-                    <img src="${IMG_BASE}${material?.toLowerCase() || 'stone'}" onerror="handleItemIconError(this, '${escJs(material || 'stone')}', true)" alt="">
+                    <img src="${getItemIconUrl(material || 'stone')}" onerror="handleItemIconError(this, '${escJs(material || 'stone')}', true)" alt="">
                     ${name}
                 </h3>
                 <button class="chart-modal-close" onclick="this.closest('.chart-modal-overlay').remove()">
