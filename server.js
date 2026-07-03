@@ -445,7 +445,6 @@ app.post('/api/register', async (req, res) => {
                     }
                 }
             }
-            }
         } else {
             // Same key — re-register: update lastSync
             existing.lastSync = Date.now();
