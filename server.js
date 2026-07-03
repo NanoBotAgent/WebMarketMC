@@ -5,7 +5,7 @@
  * for multiple Minecraft servers. Each MC server syncs its
  * data here via outbound HTTP — no ports needed on the MC side.
  * 
- * Persistence: Astra DB (DataStax) via REST v2 API
+ * Persistence: Astra DB (DataStaxa) via REST v2 API
  * Caching: In-memory write-through cache for performance
  * Encryption: AES-256-GCM field-level encryption for sensitive data
  */
@@ -431,16 +431,31 @@ app.post('/api/register', async (req, res) => {
     if (serverCache.has(serverId)) {
         const existing = serverCache.get(serverId);
         if (existing.apiKey !== apiKey) {
-            return res.status(403).json({ error: 'API key mismatch for this server ID' });
+            // Stale entry with old API key — purge and allow fresh registration
+            console.log(`[Register] API key mismatch for ${serverId} — purging stale cache entry`);
+            serverCache.delete(serverId);
+            if (ASTRA_TOKEN) {
+                astraDelete('servers', serverId).catch(e =>
+                    console.error('[Astra] Failed to delete stale server:', e.message)
+                );
+                for (const [token, session] of sessionCache) {
+                    if (session.serverId === serverId) {
+                        sessionCache.delete(token);
+                        astraDelete('sessions', encrypt(token)).catch(() => {});
+                    }
+                );
+                }
+            }
+        } else {
+            // Same key — re-register: update lastSync
+            existing.lastSync = Date.now();
+            if (ASTRA_TOKEN) {
+                astraUpdate('servers', serverId, { last_sync: existing.lastSync }).catch(e =>
+                    console.error('[Astra] Failed to update lastSync:', e.message)
+                );
+            }
+            return res.json({ success: true });
         }
-        // Re-register: update lastSync
-        existing.lastSync = Date.now();
-        if (ASTRA_TOKEN) {
-            astraUpdate('servers', serverId, { last_sync: existing.lastSync }).catch(e =>
-                console.error('[Astra] Failed to update lastSync:', e.message)
-            );
-        }
-        return res.json({ success: true });
     }
 
     // Check Astra DB for existing server (may have survived a restart)
@@ -449,14 +464,19 @@ app.post('/api/register', async (req, res) => {
         if (dbResult.ok && dbResult.data?.data) {
             const existing = deserializeServer(dbResult.data.data);
             if (existing.apiKey !== apiKey) {
-                return res.status(403).json({ error: 'API key mismatch for this server ID' });
+                // Stale DB entry with old API key — purge and allow fresh registration
+                console.log(`[Register] DB API key mismatch for ${serverId} — purging stale DB entry`);
+                astraDelete('servers', serverId).catch(e =>
+                    console.error('[Astra] Failed to delete stale DB server:', e.message)
+                );
+            } else {
+                // Same key — restore to cache
+                existing.lastSync = Date.now();
+                serverCache.set(serverId, existing);
+                astraUpdate('servers', serverId, { last_sync: existing.lastSync }).catch(() => {});
+                console.log(`[Register] Restored server "${existing.serverName}" from DB (${serverId})`);
+                return res.json({ success: true });
             }
-            // Restore to cache
-            existing.lastSync = Date.now();
-            serverCache.set(serverId, existing);
-            astraUpdate('servers', serverId, { last_sync: existing.lastSync }).catch(() => {});
-            console.log(`[Register] Restored server "${existing.serverName}" from DB (${serverId})`);
-            return res.json({ success: true });
         }
     }
 
