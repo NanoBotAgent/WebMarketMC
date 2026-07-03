@@ -443,8 +443,8 @@ app.post('/api/register', async (req, res) => {
                         sessionCache.delete(token);
                         astraDelete('sessions', encrypt(token)).catch(() => {});
                     }
-                );
                 }
+            }
             }
         } else {
             // Same key — re-register: update lastSync
