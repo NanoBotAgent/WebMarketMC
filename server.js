@@ -653,7 +653,7 @@ app.post('/api/confirm-purchase', requireApiKey, async (req, res) => {
 // ══════════════════════════════════════════════════════════════════
 
 /** Middleware: validate session token for browser requests */
-function requireSession(req, res, next) {
+async function requireSession(req, res, next) {
     const token = (req.headers.authorization || '').replace('Bearer ', '');
     if (!token) return res.status(401).json({ error: 'Missing token' });
 
@@ -764,7 +764,9 @@ app.get('/api/:serverId/price-history', requireSession, (req, res) => {
 app.post('/api/:serverId/buy', requireSession, async (req, res) => {
     const { item, amount } = req.body;
 
-    if (!item || !amount || amount < 1 || amount > 64) {
+    // Strict validation: amount must be a finite integer 1-64
+    const quantity = Number(amount);
+    if (!item || !Number.isInteger(quantity) || quantity < 1 || quantity > 64) {
         return res.status(400).json({ error: 'Invalid item or amount' });
     }
 
@@ -775,7 +777,7 @@ app.post('/api/:serverId/buy', requireSession, async (req, res) => {
         type: 'buy',
         item,
         itemKey: item,
-        amount: Math.min(64, Math.max(1, parseInt(amount))),
+        amount: quantity,
         status: 'pending',
         createdAt: Date.now(),
     };
@@ -795,7 +797,11 @@ app.post('/api/:serverId/buy', requireSession, async (req, res) => {
 app.post('/api/:serverId/bid', requireSession, async (req, res) => {
     const { auctionId, amount } = req.body;
 
-    if (!auctionId || amount == null || amount <= 0) {
+    // Strict validation: auctionId must be integer, amount must be finite > 0
+    const parsedAuctionId = parseInt(auctionId);
+    const parsedAmount = parseFloat(amount);
+    if (!auctionId || !Number.isInteger(parsedAuctionId) || parsedAuctionId <= 0 ||
+        amount == null || !Number.isFinite(parsedAmount) || parsedAmount <= 0) {
         return res.status(400).json({ error: 'Invalid auction or amount' });
     }
 
@@ -804,8 +810,8 @@ app.post('/api/:serverId/bid', requireSession, async (req, res) => {
         serverId: req.serverId,
         playerUuid: req.session.playerUuid,
         type: 'bid',
-        auctionId: parseInt(auctionId),
-        amount: isNaN(parseFloat(amount)) ? 0 : parseFloat(amount),
+        auctionId: parsedAuctionId,
+        amount: parsedAmount,
         status: 'pending',
         createdAt: Date.now(),
     };
@@ -825,7 +831,11 @@ app.post('/api/:serverId/bid', requireSession, async (req, res) => {
 app.post('/api/:serverId/fill-order', requireSession, async (req, res) => {
     const { orderId, amount } = req.body;
 
-    if (!orderId || amount == null || isNaN(Number(amount)) || amount <= 0) {
+    // Strict validation: orderId must be integer, amount must be integer > 0
+    const parsedOrderId = parseInt(orderId);
+    const parsedAmount = parseInt(amount);
+    if (!orderId || !Number.isInteger(parsedOrderId) || parsedOrderId <= 0 ||
+        amount == null || !Number.isInteger(parsedAmount) || parsedAmount <= 0) {
         return res.status(400).json({ error: 'Invalid order or amount' });
     }
 
@@ -834,8 +844,8 @@ app.post('/api/:serverId/fill-order', requireSession, async (req, res) => {
         serverId: req.serverId,
         playerUuid: req.session.playerUuid,
         type: 'fill_order',
-        orderId: parseInt(orderId),
-        amount: parseInt(amount),
+        orderId: parsedOrderId,
+        amount: parsedAmount,
         status: 'pending',
         createdAt: Date.now(),
     };
