@@ -22,18 +22,28 @@ const app = express();
 
 // ── Astra DB Configuration ──────────────────────────────────────
 const ASTRA_TOKEN = process.env.ASTRA_TOKEN || '';
-const ASTRA_DB_ID = process.env.ASTRA_DB_ID || '165b585e-7ece-4015-987f-165032706b56';
-const ASTRA_REGION = process.env.ASTRA_REGION || 'us-east-2';
-const ASTRA_KEYSPACE = process.env.ASTRA_KEYSPACE || 'webmarketmc';
-const ASTRA_BASE = `https://${ASTRA_DB_ID}-${ASTRA_REGION}.apps.astra.datastax.com`;
-const ASTRA_REST = `${ASTRA_BASE}/api/rest/v2/keyspaces/${ASTRA_KEYSPACE}`;
+const ASTRA_DB_ID = process.env.ASTRA_DB_ID;
+const ASTRA_REGION = process.env.ASTRA_REGION;
+const ASTRA_KEYSPACE = process.env.ASTRA_KEYSPACE;
+
+// Fail fast if Astra is configured but target env vars are missing
+if (ASTRA_TOKEN && (!ASTRA_DB_ID || !ASTRA_REGION || !ASTRA_KEYSPACE)) {
+    console.error('[Astra] ASTRA_DB_ID, ASTRA_REGION, and ASTRA_KEYSPACE are required when ASTRA_TOKEN is set');
+    process.exit(1);
+}
+
+const ASTRA_BASE = ASTRA_DB_ID && ASTRA_REGION
+    ? `https://${ASTRA_DB_ID}-${ASTRA_REGION}.apps.astra.datastax.com`
+    : '';
+const ASTRA_REST = ASTRA_BASE && ASTRA_KEYSPACE
+    ? `${ASTRA_BASE}/api/rest/v2/keyspaces/${ASTRA_KEYSPACE}`
+    : '';
 
 // ── Field-Level Encryption ──────────────────────────────────────
 // AES-256-GCM encryption for sensitive fields stored in Astra DB.
-// If ENCRYPTION_KEY is not set, encryption is disabled (plaintext mode).
+// If ENCRYPTION_KEY is not set and Astra is enabled, fail fast.
+// If neither is set, run in plaintext mode (local/dev only).
 // Encrypted values are prefixed with "enc:" for auto-detection on read.
-// This provides backward compatibility: old plaintext data is read as-is,
-// and new writes are encrypted when the key is available.
 
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || '';
 const ENCRYPTION_PREFIX = 'enc:';
@@ -62,8 +72,12 @@ const derivedKey = deriveKey(ENCRYPTION_KEY);
 if (derivedKey) {
     encryptionEnabled = true;
     console.log('[Encryption] AES-256-GCM field-level encryption enabled');
+} else if (ASTRA_TOKEN) {
+    // Astra persistence requires encryption for sensitive fields
+    console.error('[Encryption] ENCRYPTION_KEY is required when Astra persistence is enabled');
+    process.exit(1);
 } else {
-    console.log('[Encryption] No ENCRYPTION_KEY set — running in plaintext mode');
+    console.log('[Encryption] No ENCRYPTION_KEY set — running in plaintext mode (local/dev only)');
 }
 
 /**
@@ -121,10 +135,11 @@ function decrypt(ciphertext) {
 /**
  * Encrypt a JSON object by serializing and encrypting the whole string.
  * Used for balances_json which contains structured data.
+ * Always returns a string (JSON in plaintext mode, encrypted in encrypted mode).
  */
 function encryptJson(obj) {
-    if (!encryptionEnabled || obj === null || obj === undefined) return obj;
-    return encrypt(JSON.stringify(obj));
+    const json = JSON.stringify(obj ?? {});
+    return encryptionEnabled ? encrypt(json) : json;
 }
 
 /**
@@ -141,22 +156,33 @@ function decryptJson(ciphertext) {
     try { return JSON.parse(decrypted); } catch { return {}; }
 }
 
+/**
+ * Deterministic hash for session token (used as stable primary key).
+ * Uses HMAC-SHA256 with a fixed key derived from ENCRYPTION_KEY or a constant.
+ */
+function tokenHash(token) {
+    const key = derivedKey || crypto.createHash('sha256').update('webmarketmc-session-key').digest();
+    return crypto.createHmac('sha256', key).update(token).digest('hex');
+}
+
 // ── In-Memory Write-Through Cache ──────────────────────────────
 // These cache Astra DB data for fast reads; writes go to DB first
 // Cache stores DECRYPTED values — encryption only applies to DB storage
 /** @type {Map<string, object>} serverId → server data */
 const serverCache = new Map();
-/** @type {Map<string, object>} token → session data */
+/** @type {Map<string, object>} tokenHash → session data */
 const sessionCache = new Map();
 /** @type {Map<string, object>} purchaseId → purchase data */
 const purchaseCache = new Map();
 
 // Track if initial cache load is done
 let cacheReady = false;
-let cacheReadyPromise = null;
 
 // ── Astra DB Helper ─────────────────────────────────────────────
+const ASTRA_TIMEOUT_MS = 10000;
+
 async function astraFetch(table, method, pathSuffix, body) {
+    if (!ASTRA_REST) return { ok: false, error: 'Astra not configured' };
     const url = `${ASTRA_REST}/${table}${pathSuffix ? '/' + pathSuffix : ''}`;
     const headers = {
         'Authorization': `Bearer ${ASTRA_TOKEN}`,
@@ -166,17 +192,33 @@ async function astraFetch(table, method, pathSuffix, body) {
     const opts = { method, headers };
     if (body !== undefined) opts.body = JSON.stringify(body);
 
-    const resp = await fetch(url, opts);
-    if (resp.status === 204 || resp.status === 201) return { ok: true, status: resp.status, data: null };
-    const text = await resp.text();
-    let data = null;
-    try { data = JSON.parse(text); } catch {}
-    if (!resp.ok) {
-        const errMsg = data?.description || data?.message || text.slice(0, 200);
-        console.error(`[Astra] ${method} ${url} → ${resp.status}: ${errMsg}`);
-        return { ok: false, status: resp.status, data, error: errMsg };
+    // Add timeout via AbortController
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), ASTRA_TIMEOUT_MS);
+    opts.signal = controller.signal;
+
+    try {
+        const resp = await fetch(url, opts);
+        clearTimeout(timeoutId);
+        if (resp.status === 204 || resp.status === 201) return { ok: true, status: resp.status, data: null };
+        const text = await resp.text();
+        let data = null;
+        try { data = JSON.parse(text); } catch {}
+        if (!resp.ok) {
+            const errMsg = data?.description || data?.message || text.slice(0, 200);
+            console.error(`[Astra] ${method} ${url} → ${resp.status}: ${errMsg}`);
+            return { ok: false, status: resp.status, data, error: errMsg };
+        }
+        return { ok: true, status: resp.status, data };
+    } catch (e) {
+        clearTimeout(timeoutId);
+        if (e.name === 'AbortError') {
+            console.error(`[Astra] ${method} ${url} → timeout after ${ASTRA_TIMEOUT_MS}ms`);
+            return { ok: false, error: 'timeout' };
+        }
+        console.error(`[Astra] ${method} ${url} → error:`, e.message);
+        return { ok: false, error: e.message };
     }
-    return { ok: true, status: resp.status, data };
 }
 
 // Get a single row by primary key
@@ -201,22 +243,73 @@ async function astraDelete(table, pk) {
 
 // Query rows with a filter (value is escaped for CQL safety)
 async function astraQuery(table, column, value) {
+    if (!ASTRA_REST) return { ok: false, data: null };
     const safeValue = String(value).replace(/"/g, '\\"');
-    const url = `${ASTRA_REST}/${table}?where={"${column}":{"$eq":"${safeValue}"}}`;
-    const resp = await fetch(url, {
-        headers: {
-            'Authorization': `Bearer ${ASTRA_TOKEN}`,
-            'X-Cassandra-Token': ASTRA_TOKEN,
-        },
-    });
-    const text = await resp.text();
-    let data = null;
-    try { data = JSON.parse(text); } catch {}
-    if (!resp.ok) {
-        console.error(`[Astra] QUERY ${table} WHERE ${column}=${value} → ${resp.status}`);
-        return { ok: false, data: null };
+    const where = encodeURIComponent(JSON.stringify({ [column]: { $eq: safeValue } }));
+    const url = `${ASTRA_REST}/${table}?where=${where}`;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), ASTRA_TIMEOUT_MS);
+    try {
+        const resp = await fetch(url, {
+            headers: {
+                'Authorization': `Bearer ${ASTRA_TOKEN}`,
+                'X-Cassandra-Token': ASTRA_TOKEN,
+            },
+            signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
+        const text = await resp.text();
+        let data = null;
+        try { data = JSON.parse(text); } catch {}
+        if (!resp.ok) {
+            console.error(`[Astra] QUERY ${table} WHERE ${column}=${value} → ${resp.status}`);
+            return { ok: false, data: null };
+        }
+        return { ok: true, data: data?.data || [] };
+    } catch (e) {
+        clearTimeout(timeoutId);
+        if (e.name === 'AbortError') {
+            console.error(`[Astra] QUERY ${table} → timeout`);
+            return { ok: false, error: 'timeout' };
+        }
+        console.error(`[Astra] QUERY ${table} → error:`, e.message);
+        return { ok: false, error: e.message };
     }
-    return { ok: true, data: data?.data || [] };
+}
+
+// ── Pagination helper: fetch all pages ──────────────────────────
+async function loadAllPages(table, pageSize = 500) {
+    if (!ASTRA_REST) return [];
+    const all = [];
+    let pageState = null;
+    do {
+        let url = `${ASTRA_REST}/${table}?pageSize=${pageSize}`;
+        if (pageState) url += `&pageState=${encodeURIComponent(pageState)}`;
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), ASTRA_TIMEOUT_MS);
+        try {
+            const resp = await fetch(url, {
+                headers: {
+                    'Authorization': `Bearer ${ASTRA_TOKEN}`,
+                    'X-Cassandra-Token': ASTRA_TOKEN,
+                },
+                signal: controller.signal,
+            });
+            clearTimeout(timeoutId);
+            const text = await resp.text();
+            let data = null;
+            try { data = JSON.parse(text); } catch {}
+            if (!resp.ok || !data?.data) break;
+            all.push(...data.data);
+            pageState = data.pageState || null;
+        } catch (e) {
+            clearTimeout(timeoutId);
+            if (e.name === 'AbortError') console.error(`[Astra] loadAllPages ${table} → timeout`);
+            else console.error(`[Astra] loadAllPages ${table} → error:`, e.message);
+            break;
+        }
+    } while (pageState);
+    return all;
 }
 
 // ── Cache Load on Startup ──────────────────────────────────────
@@ -229,49 +322,42 @@ async function loadCacheFromDB() {
 
     console.log('[Cache] Loading data from Astra DB...');
 
-    // Load servers
-    const serversResp = await astraFetch('servers', 'GET', '?pageSize=100');
-    if (serversResp.ok && serversResp.data?.data) {
-        for (const row of serversResp.data.data) {
-            serverCache.set(row.server_id, deserializeServer(row));
-        }
-        console.log(`[Cache] Loaded ${serverCache.size} servers`);
+    // Load servers (all pages)
+    const serverRows = await loadAllPages('servers');
+    for (const row of serverRows) {
+        serverCache.set(row.server_id, deserializeServer(row));
     }
+    console.log(`[Cache] Loaded ${serverCache.size} servers`);
 
     // Load sessions (only non-expired)
-    const sessionsResp = await astraFetch('sessions', 'GET', '?pageSize=500');
-    if (sessionsResp.ok && sessionsResp.data?.data) {
-        const now = Date.now();
-        let loaded = 0;
-        for (const row of sessionsResp.data.data) {
-            if (row.expires > now) {
-                const session = deserializeSession(row);
-                // Use decrypted token as cache key
-                const tokenKey = decrypt(row.session_token);
-                sessionCache.set(tokenKey, session);
-                loaded++;
-            }
+    const sessionRows = await loadAllPages('sessions', 500);
+    const now = Date.now();
+    let loadedSessions = 0;
+    for (const row of sessionRows) {
+        if (row.expires > now) {
+            const session = deserializeSession(row);
+            const tokenKey = tokenHash(row.session_token); // PK is tokenHash
+            sessionCache.set(tokenKey, session);
+            loadedSessions++;
         }
-        console.log(`[Cache] Loaded ${loaded} active sessions`);
     }
+    console.log(`[Cache] Loaded ${loadedSessions} active sessions`);
 
     // Load purchases (only pending, not stale)
-    const purchasesResp = await astraFetch('purchases', 'GET', '?pageSize=500');
-    if (purchasesResp.ok && purchasesResp.data?.data) {
-        const now = Date.now();
-        let loaded = 0;
-        for (const row of purchasesResp.data.data) {
-            const age = now - row.created_at;
-            if (row.status === 'pending' && age < 600_000) {
-                purchaseCache.set(row.purchase_id, deserializePurchase(row));
-                loaded++;
-            } else if (row.status !== 'pending' && age < 300_000) {
-                purchaseCache.set(row.purchase_id, deserializePurchase(row));
-                loaded++;
-            }
+    const purchaseRows = await loadAllPages('purchases', 500);
+    const now2 = Date.now();
+    let loadedPurchases = 0;
+    for (const row of purchaseRows) {
+        const age = now2 - row.created_at;
+        if (row.status === 'pending' && age < 600_000) {
+            purchaseCache.set(row.purchase_id, deserializePurchase(row));
+            loadedPurchases++;
+        } else if (row.status !== 'pending' && age < 300_000) {
+            purchaseCache.set(row.purchase_id, deserializePurchase(row));
+            loadedPurchases++;
         }
-        console.log(`[Cache] Loaded ${loaded} recent purchases`);
     }
+    console.log(`[Cache] Loaded ${loadedPurchases} recent purchases`);
 
     cacheReady = true;
     console.log('[Cache] Ready');
@@ -317,7 +403,8 @@ function deserializeServer(row) {
 
 function serializeSession(token, s) {
     return {
-        session_token: encrypt(token),
+        session_token: tokenHash(token), // PK is deterministic hash
+        encrypted_token: encrypt(token), // encrypted token in separate column
         server_id: s.serverId,
         player_uuid: encrypt(s.playerUuid),
         player_name: s.playerName || 'Player',
@@ -411,9 +498,9 @@ function requireApiKey(req, res, next) {
     next();
 }
 
-// ══════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════
 // PLUGIN → RENDER  (MC server pushes data here)
-// ══════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════
 
 /** POST /api/register — MC plugin registers on startup */
 app.post('/api/register', async (req, res) => {
@@ -448,9 +535,7 @@ app.post('/api/register', async (req, res) => {
             // Same key — re-register: update lastSync
             existing.lastSync = Date.now();
             if (ASTRA_TOKEN) {
-                astraUpdate('servers', serverId, { last_sync: existing.lastSync }).catch(e =>
-                    console.error('[Astra] Failed to update lastSync:', e.message)
-                );
+                await astraUpdate('servers', serverId, { last_sync: existing.lastSync });
             }
             return res.json({ success: true });
         }
@@ -478,7 +563,7 @@ app.post('/api/register', async (req, res) => {
                 // Same key — restore to cache
                 existing.lastSync = Date.now();
                 serverCache.set(serverId, existing);
-                astraUpdate('servers', serverId, { last_sync: existing.lastSync }).catch(() => {});
+                await astraUpdate('servers', serverId, { last_sync: existing.lastSync });
                 console.log(`[Register] Restored server "${existing.serverName}" from DB (${serverId})`);
                 return res.json({ success: true });
             }
@@ -502,9 +587,7 @@ app.post('/api/register', async (req, res) => {
     serverCache.set(serverId, server);
 
     if (ASTRA_TOKEN) {
-        astraInsert('servers', serializeServer(server)).catch(e =>
-            console.error('[Astra] Failed to insert server:', e.message)
-        );
+        await astraInsert('servers', serializeServer(server));
     }
 
     console.log(`[Register] Server "${serverName}" registered as ${serverId}`);
@@ -560,9 +643,9 @@ app.post('/api/sync', requireApiKey, async (req, res) => {
     if (priceHistory) server.priceHistoryJson = JSON.stringify(priceHistory);
     server.lastSync = Date.now();
 
-    // Persist to Astra (fire-and-forget for performance)
+    // Persist to Astra (await for durability)
     if (ASTRA_TOKEN) {
-        astraUpdate('servers', req.serverId, {
+        await astraUpdate('servers', req.serverId, {
             categories_json: JSON.stringify(server.categories),
             items_json: JSON.stringify(server.items),
             auctions_json: server.auctionsJson,
@@ -570,7 +653,7 @@ app.post('/api/sync', requireApiKey, async (req, res) => {
             stocks_json: server.stocksJson,
             price_history_json: server.priceHistoryJson,
             last_sync: server.lastSync,
-        }).catch(e => console.error('[Astra] Sync write failed:', e.message));
+        });
     }
 
     res.json({
@@ -599,13 +682,12 @@ app.post('/api/session', requireApiKey, async (req, res) => {
         expires: Date.now() + 3_600_000,
     };
 
-    // Cache key is the plaintext token — encryption only applies to DB storage
-    sessionCache.set(token, session);
+    // Cache key is deterministic tokenHash — encryption only applies to DB storage
+    const tokenKey = tokenHash(token);
+    sessionCache.set(tokenKey, session);
 
     if (ASTRA_TOKEN) {
-        astraInsert('sessions', serializeSession(token, session)).catch(e =>
-            console.error('[Astra] Session insert failed:', e.message)
-        );
+        await astraInsert('sessions', serializeSession(token, session));
     }
 
     res.json({ success: true });
@@ -617,11 +699,13 @@ app.post('/api/session-update', requireApiKey, async (req, res) => {
 
     // Update all sessions for this player on this server
     const updates = [];
-    for (const [token, session] of sessionCache) {
+    for (const [tokenKey, session] of sessionCache) {
         if (session.serverId === req.serverId && session.playerUuid === playerUuid) {
             session.balances = balances;
             if (ASTRA_TOKEN) {
-                updates.push(astraUpdate('sessions', encrypt(token), {
+                // Need to find the original token to get the PK (tokenHash)
+                // Since we only have tokenKey (which IS the tokenHash), we can use it directly
+                updates.push(astraUpdate('sessions', tokenKey, {
                     balances_json: encryptJson(balances),
                 }).catch(e => console.error('[Astra] Session update failed:', e.message)));
             }
@@ -645,36 +729,37 @@ app.post('/api/confirm-purchase', requireApiKey, async (req, res) => {
     purchase.result = { newBalance, spent, success };
 
     if (ASTRA_TOKEN) {
-        astraUpdate('purchases', purchaseId, {
+        await astraUpdate('purchases', purchaseId, {
             status: purchase.status,
             result_json: encrypt(JSON.stringify(purchase.result)),
-        }).catch(e => console.error('[Astra] Purchase confirm failed:', e.message));
+        });
     }
 
     res.json({ success: true });
 });
 
-// ══════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════
 // BROWSER → RENDER  (player dashboard requests)
-// ══════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════
 
 /** Middleware: validate session token for browser requests */
 async function requireSession(req, res, next) {
     const token = (req.headers.authorization || '').replace('Bearer ', '');
     if (!token) return res.status(401).json({ error: 'Missing token' });
 
-    const session = sessionCache.get(token);
+    const tokenKey = tokenHash(token);
+    const session = sessionCache.get(tokenKey);
     if (!session) return res.status(401).json({ error: 'Invalid or expired session. Use /web in-game.' });
     if (session.expires < Date.now()) {
-        sessionCache.delete(token);
-        if (ASTRA_TOKEN) astraDelete('sessions', encrypt(token)).catch(() => {});
+        sessionCache.delete(tokenKey);
+        if (ASTRA_TOKEN) await astraDelete('sessions', tokenKey).catch(() => {});
         return res.status(401).json({ error: 'Session expired. Use /web in-game.' });
     }
 
     // Rolling 1-hour timeout
     session.expires = Date.now() + 3_600_000;
     if (ASTRA_TOKEN) {
-        astraUpdate('sessions', encrypt(token), { expires: session.expires }).catch(() => {});
+        await astraUpdate('sessions', tokenKey, { expires: session.expires }).catch(() => {});
     }
 
     req.session = session;
@@ -791,9 +876,7 @@ app.post('/api/:serverId/buy', requireSession, async (req, res) => {
     purchaseCache.set(purchaseId, purchase);
 
     if (ASTRA_TOKEN) {
-        astraInsert('purchases', serializePurchase(purchaseId, purchase)).catch(e =>
-            console.error('[Astra] Purchase insert failed:', e.message)
-        );
+        await astraInsert('purchases', serializePurchase(purchaseId, purchase));
     }
 
     res.json({ success: true, purchaseId, message: 'Purchase queued — delivering in-game...' });
@@ -825,9 +908,7 @@ app.post('/api/:serverId/bid', requireSession, async (req, res) => {
     purchaseCache.set(purchaseId, purchase);
 
     if (ASTRA_TOKEN) {
-        astraInsert('purchases', serializePurchase(purchaseId, purchase)).catch(e =>
-            console.error('[Astra] Bid insert failed:', e.message)
-        );
+        await astraInsert('purchases', serializePurchase(purchaseId, purchase));
     }
 
     res.json({ success: true, purchaseId, message: 'Bid queued — confirming in-game...' });
@@ -859,9 +940,7 @@ app.post('/api/:serverId/fill-order', requireSession, async (req, res) => {
     purchaseCache.set(purchaseId, purchase);
 
     if (ASTRA_TOKEN) {
-        astraInsert('purchases', serializePurchase(purchaseId, purchase)).catch(e =>
-            console.error('[Astra] Order fill insert failed:', e.message)
-        );
+        await astraInsert('purchases', serializePurchase(purchaseId, purchase));
     }
 
     res.json({ success: true, purchaseId, message: 'Fulfillment queued — verifying in-game inventory...' });
@@ -885,9 +964,9 @@ app.get('/api/:serverId/purchase-status', requireSession, (req, res) => {
     });
 });
 
-// ══════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════
 // STATIC FILES + DASHBOARD PAGE
-// ══════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════
 
 app.use('/static', express.static(path.join(__dirname, 'public')));
 
@@ -949,9 +1028,9 @@ app.get('/shop/:serverId', (req, res) => {
     }
 });
 
-// ══════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════
 // HELPERS
-// ══════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════
 
 function getPendingPurchases(serverId, playerUuid) {
     const pending = [];
@@ -970,10 +1049,10 @@ setInterval(async () => {
     const purchaseDeletes = [];
     const serverDeletes = [];
 
-    for (const [token, session] of sessionCache) {
+    for (const [tokenKey, session] of sessionCache) {
         if (session.expires < now) {
-            sessionCache.delete(token);
-            sessionDeletes.push(token);
+            sessionCache.delete(tokenKey);
+            sessionDeletes.push(tokenKey);
         }
     }
 
@@ -998,23 +1077,23 @@ setInterval(async () => {
         }
     }
 
-    // Batch delete from Astra (encrypt session tokens for DB lookup)
+    // Batch delete from Astra (tokenKey is already the PK for sessions)
     if (ASTRA_TOKEN) {
-        for (const token of sessionDeletes) {
-            astraDelete('sessions', encrypt(token)).catch(() => {});
+        for (const tokenKey of sessionDeletes) {
+            await astraDelete('sessions', tokenKey).catch(() => {});
         }
         for (const id of purchaseDeletes) {
-            astraDelete('purchases', id).catch(() => {});
+            await astraDelete('purchases', id).catch(() => {});
         }
         for (const id of serverDeletes) {
-            astraDelete('servers', id).catch(() => {});
+            await astraDelete('servers', id).catch(() => {});
         }
     }
 }, 60_000);
 
-// ══════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════
 // START
-// ══════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════
 
 const PORT = process.env.PORT || 3000;
 
