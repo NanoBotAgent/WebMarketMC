@@ -256,7 +256,7 @@ function deserializePurchase(row) {
 // ── Security Middleware ──────────────────────────────────────────
 app.use(helmet({ contentSecurityPolicy: false })); // CSP disabled for inline styles
 app.use(cors({ origin: 'https://webaureliummc.onrender.com' }));
-app.use(express.json({ limit: '7mb' }));
+app.use(express.json({ limit: '15mb' }));
 
 // Rate limit: 330 requests per minute per IP
 app.use('/api/', rateLimit({
@@ -335,11 +335,17 @@ app.post('/api/register', (req, res) => {
         return res.status(400).json({ error: 'Missing serverId or apiKey' });
     }
 
-    // If server already exists, validate the key
+    // If server already exists with a different API key, accept the new key
+    // (server may have regenerated its key on restart; serverId is a persistent UUID)
     if (servers.has(serverId)) {
         const existing = servers.get(serverId);
         if (existing.apiKey !== apiKey) {
-            return res.status(403).json({ error: 'API key mismatch for this server ID' });
+            console.log(`[Register] API key updated for ${serverId} (was ${existing.apiKey.slice(0,8)}... → ${apiKey.slice(0,8)}...)`);
+            existing.apiKey = apiKey;
+            existing.serverName = serverName || existing.serverName;
+            existing.lastSync = Date.now();
+            res.json({ success: true, reRegistered: true });
+            return;
         }
     } else {
         // Enforce Max RAM Activation Queue
@@ -435,7 +441,7 @@ app.post('/api/sync', requireApiKey, (req, res) => {
     if (priceHistory) server.priceHistoryJson = JSON.stringify(priceHistory);
     server.lastSync = Date.now();
 
-    res.json({ success: true, pendingPurchases: getPendingPurchases(req.serverId).map(p => ({ id: p.id, itemKey: p.itemKey, amount: p.amount, currency: p.currency, status: p.status })) });
+    res.json({ success: true, pendingPurchases: getPendingPurchases(req.serverId).map(p => ({ id: p.id, type: p.type, itemKey: p.itemKey, auctionId: p.auctionId, orderId: p.orderId, amount: p.amount, quantity: p.quantity, currency: p.currency, playerUuid: p.playerUuid, status: p.status })) });
 });
 
 /** POST /api/session — MC plugin creates a player session */
