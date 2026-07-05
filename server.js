@@ -376,7 +376,7 @@ function deserializePurchase(row) {
 // ── Security Middleware ──────────────────────────────────────────
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors({ origin: 'https://webaureliummc.onrender.com' }));
-app.use(express.json({ limit: '7mb' }));
+app.use(express.json({ limit: '15mb' }));
 
 // Rate limit: 330 requests per minute per IP
 app.use('/api/', rateLimit({
@@ -431,20 +431,19 @@ app.post('/api/register', async (req, res) => {
     if (serverCache.has(serverId)) {
         const existing = serverCache.get(serverId);
         if (existing.apiKey !== apiKey) {
-            // Stale entry with old API key — purge and allow fresh registration
-            console.log(`[Register] API key mismatch for ${serverId} — purging stale cache entry`);
-            serverCache.delete(serverId);
+            // API key changed (server restarted with new key) — accept the new key
+            console.log(`[Register] API key updated for ${serverId} (was ${existing.apiKey.slice(0,8)}... -> ${apiKey.slice(0,8)}...)`);
+            existing.apiKey = apiKey;
+            existing.serverName = serverName || existing.serverName;
+            existing.lastSync = Date.now();
             if (ASTRA_TOKEN) {
-                astraDelete('servers', serverId).catch(e =>
-                    console.error('[Astra] Failed to delete stale server:', e.message)
-                );
-                for (const [token, session] of sessionCache) {
-                    if (session.serverId === serverId) {
-                        sessionCache.delete(token);
-                        astraDelete('sessions', encrypt(token)).catch(() => {});
-                    }
-                }
+                astraUpdate('servers', serverId, {
+                    api_key: encrypt(apiKey),
+                    server_name: existing.serverName,
+                    last_sync: existing.lastSync,
+                }).catch(e => console.error('[Astra] Failed to update API key:', e.message));
             }
+            return res.json({ success: true, reRegistered: true });
         } else {
             // Same key — re-register: update lastSync
             existing.lastSync = Date.now();
@@ -463,11 +462,18 @@ app.post('/api/register', async (req, res) => {
         if (dbResult.ok && dbResult.data?.data) {
             const existing = deserializeServer(dbResult.data.data);
             if (existing.apiKey !== apiKey) {
-                // Stale DB entry with old API key — purge and allow fresh registration
-                console.log(`[Register] DB API key mismatch for ${serverId} — purging stale DB entry`);
-                astraDelete('servers', serverId).catch(e =>
-                    console.error('[Astra] Failed to delete stale DB server:', e.message)
-                );
+                // API key changed — accept new key, restore to cache with updated key
+                console.log(`[Register] DB API key updated for ${serverId} (was ${existing.apiKey.slice(0,8)}... -> ${apiKey.slice(0,8)}...)`);
+                existing.apiKey = apiKey;
+                existing.serverName = serverName || existing.serverName;
+                existing.lastSync = Date.now();
+                serverCache.set(serverId, existing);
+                astraUpdate('servers', serverId, {
+                    api_key: encrypt(apiKey),
+                    server_name: existing.serverName,
+                    last_sync: existing.lastSync,
+                }).catch(e => console.error('[Astra] Failed to update API key:', e.message));
+                return res.json({ success: true, reRegistered: true });
             } else {
                 // Same key — restore to cache
                 existing.lastSync = Date.now();
