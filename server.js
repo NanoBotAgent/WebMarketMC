@@ -349,7 +349,7 @@ async function loadCacheFromDB() {
     for (const row of sessionRows) {
         if (row.expires > now) {
             const session = deserializeSession(row);
-            const tokenKey = tokenHash(row.session_token); // PK is tokenHash
+            const tokenKey = row.session_token; // PK is the tokenHash stored in session_token column
             sessionCache.set(tokenKey, session);
             loadedSessions++;
         }
