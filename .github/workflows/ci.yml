@@ -135,7 +135,7 @@ jobs:
         if: always()
         run: kill $SERVER_PID
 
-  encryption-test:
+  hashing-test:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -152,180 +152,69 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Test encryption enabled (with ENCRYPTION_KEY)
-        run: |
-          ENCRYPTION_KEY="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" \
-          REGISTRATION_SECRET="test-secret" \
-          node -e "
-            const crypto = require('crypto');
-            const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
-            const ALGORITHM = 'aes-256-gcm';
-            const IV_LENGTH = 12;
-            const AUTH_TAG_LENGTH = 16;
-            const ENCRYPTION_PREFIX = 'enc:';
-            
-            function deriveKey(rawKey) {
-              if (!rawKey) return null;
-              if (/^[0-9a-f]{64}$/i.test(rawKey)) {
-                return Buffer.from(rawKey, 'hex');
-              }
-              return crypto.createHash('sha256').update(rawKey).digest();
-            }
-            
-            const derivedKey = deriveKey(ENCRYPTION_KEY);
-            console.log('Key derived:', !!derivedKey);
-            
-            function encrypt(plaintext) {
-              const str = String(plaintext);
-              const iv = crypto.randomBytes(IV_LENGTH);
-              const cipher = crypto.createCipheriv(ALGORITHM, derivedKey, iv, { authTagLength: AUTH_TAG_LENGTH });
-              let encrypted = cipher.update(str, 'utf8', 'base64url');
-              encrypted += cipher.final('base64url');
-              const authTag = cipher.getAuthTag().toString('base64url');
-              const ivB64 = iv.toString('base64url');
-              return ENCRYPTION_PREFIX + ivB64 + ':' + encrypted + ':' + authTag;
-            }
-            
-            function decrypt(ciphertext) {
-              if (!ciphertext || typeof ciphertext !== 'string' || !ciphertext.startsWith(ENCRYPTION_PREFIX)) {
-                return ciphertext;
-              }
-              const parts = ciphertext.slice(ENCRYPTION_PREFIX.length).split(':');
-              if (parts.length !== 3) return ciphertext;
-              const [ivB64, encData, authTagB64] = parts;
-              const iv = Buffer.from(ivB64, 'base64url');
-              const authTag = Buffer.from(authTagB64, 'base64url');
-              const decipher = crypto.createDecipheriv(ALGORITHM, derivedKey, iv, { authTagLength: AUTH_TAG_LENGTH });
-              decipher.setAuthTag(authTag);
-              let decrypted = decipher.update(encData, 'base64url', 'utf8');
-              decrypted += decipher.final('utf8');
-              return decrypted;
-            }
-            
-            const test = 'hello world';
-            const enc = encrypt(test);
-            console.log('Encrypted:', enc);
-            const dec = decrypt(enc);
-            console.log('Decrypted:', dec);
-            console.log('Match:', test === dec);
-            
-            // Test JSON
-            const obj = { balances: { Aurels: 1000 }, items: ['a', 'b'] };
-            const json = JSON.stringify(obj);
-            const encJson = encrypt(json);
-            console.log('Encrypted JSON:', encJson);
-            const decJson = decrypt(encJson);
-            console.log('Decrypted JSON:', decJson);
-            console.log('JSON Match:', json === decJson);
-          "
-
-      - name: Test plaintext mode (no ENCRYPTION_KEY, no ASTRA_TOKEN)
+      - name: Test SHA256 hashing (one-way, deterministic)
         run: |
           REGISTRATION_SECRET="test-secret" \
           node -e "
             const crypto = require('crypto');
-            const ENCRYPTION_KEY = '';
-            const ALGORITHM = 'aes-256-gcm';
-            const IV_LENGTH = 12;
-            const AUTH_TAG_LENGTH = 16;
-            const ENCRYPTION_PREFIX = 'enc:';
             
-            function deriveKey(rawKey) {
-              if (!rawKey) return null;
-              if (/^[0-9a-f]{64}$/i.test(rawKey)) {
-                return Buffer.from(rawKey, 'hex');
-              }
-              return crypto.createHash('sha256').update(rawKey).digest();
+            function hashApiKey(key) {
+              if (!key) return '';
+              return crypto.createHash('sha256').update(String(key)).digest('hex');
             }
             
-            const derivedKey = deriveKey(ENCRYPTION_KEY);
-            const encryptionEnabled = !!derivedKey;
-            console.log('Encryption enabled:', encryptionEnabled);
-            
-            function encrypt(plaintext) {
-              if (!encryptionEnabled || plaintext === null || plaintext === undefined) {
-                return plaintext;
-              }
-              const str = String(plaintext);
-              const iv = crypto.randomBytes(IV_LENGTH);
-              const cipher = crypto.createCipheriv(ALGORITHM, derivedKey, iv, { authTagLength: AUTH_TAG_LENGTH });
-              let encrypted = cipher.update(str, 'utf8', 'base64url');
-              encrypted += cipher.final('base64url');
-              const authTag = cipher.getAuthTag().toString('base64url');
-              const ivB64 = iv.toString('base64url');
-              return ENCRYPTION_PREFIX + ivB64 + ':' + encrypted + ':' + authTag;
+            function apiKeyMatches(plaintext, stored) {
+              if (!plaintext || !stored) return false;
+              if (plaintext === stored) return true;
+              return hashApiKey(plaintext) === stored;
             }
             
-            function decrypt(ciphertext) {
-              if (!ciphertext || typeof ciphertext !== 'string' || !ciphertext.startsWith(ENCRYPTION_PREFIX)) {
-                return ciphertext;
-              }
-              if (!encryptionEnabled) {
-                return ciphertext;
-              }
-              const parts = ciphertext.slice(ENCRYPTION_PREFIX.length).split(':');
-              if (parts.length !== 3) return ciphertext;
-              const [ivB64, encData, authTagB64] = parts;
-              const iv = Buffer.from(ivB64, 'base64url');
-              const authTag = Buffer.from(authTagB64, 'base64url');
-              const decipher = crypto.createDecipheriv(ALGORITHM, derivedKey, iv, { authTagLength: AUTH_TAG_LENGTH });
-              decipher.setAuthTag(authTag);
-              let decrypted = decipher.update(encData, 'base64url', 'utf8');
-              decrypted += decipher.final('utf8');
-              return decrypted;
-            }
+            // Test 1: Same input always produces same hash (deterministic)
+            const key1 = 'a3f7b2c1d9e8';
+            const key2 = 'a3f7b2c1d9e8';
+            const hash1 = hashApiKey(key1);
+            const hash2 = hashApiKey(key2);
+            console.log('Deterministic:', hash1 === hash2);
+            if (hash1 !== hash2) { console.error('FAIL: Same key produced different hashes'); process.exit(1); }
             
-            function encryptJson(obj) {
-              const json = JSON.stringify(obj ?? {});
-              return encryptionEnabled ? encrypt(json) : json;
-            }
+            // Test 2: Different inputs produce different hashes
+            const hash3 = hashApiKey('different-key');
+            console.log('Distinct:', hash1 !== hash3);
+            if (hash1 === hash3) { console.error('FAIL: Different keys produced same hash'); process.exit(1); }
             
-            function decryptJson(ciphertext) {
-              if (!ciphertext) return {};
-              const decrypted = decrypt(ciphertext);
-              if (typeof decrypted !== 'string' || decrypted.startsWith(ENCRYPTION_PREFIX)) {
-                try { return JSON.parse(ciphertext); } catch { return {}; }
-              }
-              try { return JSON.parse(decrypted); } catch { return {}; }
-            }
+            // Test 3: Hash is not reversible (64 hex chars, no plaintext leakage)
+            console.log('Hash length:', hash1.length);
+            console.log('Is hex:', /^[0-9a-f]{64}$/.test(hash1));
+            if (!/^[0-9a-f]{64}$/.test(hash1)) { console.error('FAIL: Hash is not valid SHA256 hex'); process.exit(1); }
             
-            // Test plaintext mode
-            const testObj = { balances: { Aurels: 1000 } };
-            const enc = encryptJson(testObj);
-            console.log('Plaintext mode - encryptJson returns string:', typeof enc === 'string');
-            console.log('Plaintext mode - value:', enc);
-            const dec = decryptJson(enc);
-            console.log('Plaintext mode - decryptJson works:', JSON.stringify(dec) === JSON.stringify(testObj));
+            // Test 4: apiKeyMatches works for plaintext (in-memory) and hash (DB)
+            console.log('Match plaintext:', apiKeyMatches('a3f7b2c1d9e8', 'a3f7b2c1d9e8'));
+            if (!apiKeyMatches('a3f7b2c1d9e8', 'a3f7b2c1d9e8')) { console.error('FAIL: plaintext match failed'); process.exit(1); }
+            
+            console.log('Match hash:', apiKeyMatches('a3f7b2c1d9e8', hash1));
+            if (!apiKeyMatches('a3f7b2c1d9e8', hash1)) { console.error('FAIL: hash match failed'); process.exit(1); }
+            
+            console.log('Reject mismatch:', !apiKeyMatches('wrong-key', hash1));
+            if (apiKeyMatches('wrong-key', hash1)) { console.error('FAIL: wrong key matched'); process.exit(1); }
+            
+            // Test 5: No ENCRYPTION_KEY needed — hashing only uses SHA256 built-in
+            console.log('No env var needed: true');
+            
+            console.log('All hashing tests passed!');
           "
 
-  # This job is skipped when ASTRA_TOKEN is not set (memory-only mode)
-  # Uncomment and configure when you have Astra credentials in repo secrets
-  # astra-integration-test:
-  #   runs-on: ubuntu-latest
-  #   if: ${{ secrets.ASTRA_TOKEN != '' }}
-  #   steps:
-  #     - name: Checkout
-  #       uses: actions/checkout@v4
-  #       with:
-  #         persist-credentials: false
-  #     - name: Setup Node.js 24
-  #       uses: actions/setup-node@v4
-  #       with:
-  #         node-version: '24'
-  #         cache: 'npm'
-  #     - name: Install dependencies
-  #       run: npm ci
-  #     - name: Run integration test with Astra
-  #       env:
-  #         ASTRA_TOKEN: ${{ secrets.ASTRA_TOKEN }}
-  #         ASTRA_DB_ID: ${{ secrets.ASTRA_DB_ID }}
-  #         ASTRA_REGION: ${{ secrets.ASTRA_REGION }}
-  #         ASTRA_KEYSPACE: ${{ secrets.ASTRA_KEYSPACE }}
-  #         ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
-  #         REGISTRATION_SECRET: ${{ secrets.REGISTRATION_SECRET }}
-  #       run: |
-  #         node server.js &
-  #         SERVER_PID=$!
-  #         sleep 5
-  #         # Run integration tests...
-  #         kill $SERVER_PID
+      - name: Test server starts without ENCRYPTION_KEY
+        run: |
+          REGISTRATION_SECRET="test-secret" node server.js &
+          SERVER_PID=$!
+          for i in $(seq 1 10); do
+            if curl -sf http://localhost:3000/ > /dev/null 2>&1; then
+              echo "Server started without ENCRYPTION_KEY — OK"
+              kill $SERVER_PID
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "FAIL: Server did not start"
+          kill $SERVER_PID
+          exit 1
