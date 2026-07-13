@@ -46,7 +46,8 @@ const ASTRA_REST = ASTRA_BASE && ASTRA_KEYSPACE
 // and comparing hashes. This eliminates the ENCRYPTION_KEY dependency
 // and prevents stale entries across server restarts.
 
-const SESSION_HMAC_KEY = crypto.createHash('sha256').update('webmarketmc-session-key').digest();
+const SESSION_HMAC_SECRET = process.env.SESSION_HMAC_SECRET || crypto.randomBytes(32);
+const SESSION_HMAC_KEY = crypto.createHash('sha256').update(SESSION_HMAC_SECRET).digest();
 
 function hashApiKey(key) {
     if (!key) return '';
@@ -65,12 +66,12 @@ function tokenHash(token) {
 }
 
 // Compare an incoming plaintext apiKey against a stored hash.
-// The stored value may be a plaintext (legacy/memory-only) or a SHA256 hash.
+// The cache ALWAYS stores hashes for consistency. On fresh registration
+// (memory-only mode), the cache stores the hash of the provided key.
+// The plaintext === stored branch is deliberately removed to prevent
+// credential replay if a stored hash is leaked.
 function apiKeyMatches(plaintext, stored) {
     if (!plaintext || !stored) return false;
-    // Direct match (in-memory cache stores plaintext)
-    if (plaintext === stored) return true;
-    // Hash match (Astra DB stores hash)
     return hashApiKey(plaintext) === stored;
 }
 
@@ -314,7 +315,7 @@ function deserializeServer(row) {
     try { items = JSON.parse(row.items_json || '{}'); } catch {}
     return {
         serverId: row.server_id,
-        apiKey: row.api_key, // Already hashed in DB — stays hashed in cache
+        apiKey: row.api_key, // Already hashed in DB and cache
         serverName: row.server_name,
         lastSync: row.last_sync,
         categories,
@@ -343,7 +344,7 @@ function deserializeSession(row) {
     try { balances = JSON.parse(row.balances_json || '{}'); } catch {}
     return {
         serverId: row.server_id,
-        playerUuid: row.player_uuid, // Hashed in DB — stays hashed in cache
+        playerUuid: row.player_uuid, // Hashed in DB and cache — consistent with /api/session
         playerName: row.player_name || 'Player',
         balances,
         defaultCurrency: row.default_currency || 'Aurels',
@@ -355,7 +356,7 @@ function serializePurchase(id, p) {
     return {
         purchase_id: id,
         server_id: p.serverId,
-        player_uuid: hashUuid(p.playerUuid),
+        player_uuid: p.playerUuid, // Already hashed in cache — no rehash
         type: p.type,
         item_key: p.item || p.itemKey || '',
         auction_id: p.auctionId || 0,
@@ -372,7 +373,7 @@ function deserializePurchase(row) {
     try { result = JSON.parse(row.result_json || 'null'); } catch {}
     return {
         serverId: row.server_id,
-        playerUuid: row.player_uuid, // Hashed in DB — stays hashed in cache
+        playerUuid: row.player_uuid, // Already hashed — consistent with session cache
         type: row.type,
         item: row.item_key,
         itemKey: row.item_key,
@@ -464,7 +465,7 @@ app.post('/api/register', async (req, res) => {
             console.log(`[Register] Authorized key rotation for ${serverId}`);
             // Update to new key (store plaintext in cache for memory-only mode,
             // hash will be applied on DB write)
-            existing.apiKey = apiKey;
+            existing.apiKey = hashApiKey(apiKey); // Store hash in cache
             existing.serverName = serverName || existing.serverName;
             existing.lastSync = Date.now();
             if (ASTRA_TOKEN) {
@@ -513,7 +514,7 @@ app.post('/api/register', async (req, res) => {
             }
 
             console.log(`[Register] DB API key updated for ${serverId} (authorized key rotation)`);
-            existing.apiKey = apiKey; // Store plaintext in cache
+            existing.apiKey = hashApiKey(apiKey); // Store hash in cache
             existing.serverName = serverName || existing.serverName;
             existing.lastSync = Date.now();
             const updateResult = await astraUpdate('servers', serverId, {
@@ -537,8 +538,7 @@ app.post('/api/register', async (req, res) => {
 
     const server = {
         serverId,
-        apiKey,
-        serverName: serverName || 'Minecraft Server',
+        apiKey: hashApiKey(apiKey), // Always store hash in cache — consistent with DB
         lastSync: Date.now(),
         categories: [],
         items: {},
@@ -659,7 +659,7 @@ app.post('/api/session', requireApiKey, async (req, res) => {
 
     const session = {
         serverId: req.serverId,
-        playerUuid, // Plaintext in cache for IDOR checks
+        playerUuid: hashUuid(playerUuid), // Hashed in cache — consistent with DB-loaded sessions
         playerName: playerName || 'Player',
         balances: balances || {},
         defaultCurrency: defaultCurrency || 'Aurels',
@@ -681,9 +681,10 @@ app.post('/api/session-update', requireApiKey, async (req, res) => {
     const { playerUuid, balances } = req.body;
 
     // Update all sessions for this player on this server
-    const updates = [];
+    // Both cache and DB store hashUuid(playerUuid) — hash the incoming plaintext for comparison
+    const hashedUuid = hashUuid(playerUuid);
     for (const [tokenKey, session] of sessionCache) {
-        if (session.serverId === req.serverId && session.playerUuid === playerUuid) {
+        if (session.serverId === req.serverId && session.playerUuid === hashedUuid) {
             session.balances = balances;
             if (ASTRA_TOKEN) {
                 updates.push(astraUpdate('sessions', tokenKey, {
@@ -759,7 +760,7 @@ app.get('/api/:serverId/player', requireSession, (req, res) => {
     const s = req.session;
     res.json({
         name: s.playerName,
-        uuid: s.playerUuid,
+        uuid: s.playerUuid, // Hashed — not the raw UUID, but unique per player
         defaultCurrency: s.defaultCurrency,
         balances: s.balances,
     });
@@ -845,8 +846,7 @@ app.post('/api/:serverId/buy', requireSession, async (req, res) => {
     const purchaseId = crypto.randomUUID();
     const purchase = {
         serverId: req.serverId,
-        playerUuid: req.session.playerUuid,
-        type: 'buy',
+        playerUuid: req.session.playerUuid, // Already hashed in session cache
         item,
         itemKey: item,
         amount: quantity,
@@ -878,8 +878,7 @@ app.post('/api/:serverId/bid', requireSession, async (req, res) => {
     const purchaseId = crypto.randomUUID();
     const purchase = {
         serverId: req.serverId,
-        playerUuid: req.session.playerUuid,
-        type: 'bid',
+        playerUuid: req.session.playerUuid, // Already hashed in session cache
         auctionId: parsedAuctionId,
         amount: parsedAmount,
         status: 'pending',
@@ -910,8 +909,7 @@ app.post('/api/:serverId/fill-order', requireSession, async (req, res) => {
     const purchaseId = crypto.randomUUID();
     const purchase = {
         serverId: req.serverId,
-        playerUuid: req.session.playerUuid,
-        type: 'fill_order',
+        playerUuid: req.session.playerUuid, // Already hashed in session cache
         orderId: parsedOrderId,
         amount: parsedAmount,
         status: 'pending',
@@ -1016,7 +1014,8 @@ app.get('/shop/:serverId', (req, res) => {
 function getPendingPurchases(serverId, playerUuid) {
     const pending = [];
     for (const [id, p] of purchaseCache) {
-        if (p.serverId === serverId && p.status === 'pending' && (!playerUuid || p.playerUuid === playerUuid)) {
+        const pUuidMatch = !playerUuid || p.playerUuid === hashUuid(playerUuid);
+        if (p.serverId === serverId && p.status === 'pending' && pUuidMatch) {
             pending.push({ id, ...p });
         }
     }

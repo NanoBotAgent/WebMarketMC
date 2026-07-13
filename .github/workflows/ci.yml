@@ -133,7 +133,7 @@ jobs:
 
       - name: Stop server
         if: always()
-        run: kill $SERVER_PID
+        run: kill "$SERVER_PID" 2>/dev/null || true
 
   hashing-test:
     runs-on: ubuntu-latest
@@ -165,7 +165,7 @@ jobs:
             
             function apiKeyMatches(plaintext, stored) {
               if (!plaintext || !stored) return false;
-              if (plaintext === stored) return true;
+              // No plaintext === stored shortcut — prevents hash replay attacks
               return hashApiKey(plaintext) === stored;
             }
             
@@ -187,9 +187,9 @@ jobs:
             console.log('Is hex:', /^[0-9a-f]{64}$/.test(hash1));
             if (!/^[0-9a-f]{64}$/.test(hash1)) { console.error('FAIL: Hash is not valid SHA256 hex'); process.exit(1); }
             
-            // Test 4: apiKeyMatches works for plaintext (in-memory) and hash (DB)
-            console.log('Match plaintext:', apiKeyMatches('a3f7b2c1d9e8', 'a3f7b2c1d9e8'));
-            if (!apiKeyMatches('a3f7b2c1d9e8', 'a3f7b2c1d9e8')) { console.error('FAIL: plaintext match failed'); process.exit(1); }
+            // Test 4: apiKeyMatches only accepts hash match (not plaintext === stored)
+            console.log('Reject plaintext-as-stored:', !apiKeyMatches('a3f7b2c1d9e8', 'a3f7b2c1d9e8'));
+            if (apiKeyMatches('a3f7b2c1d9e8', 'a3f7b2c1d9e8')) { console.error('FAIL: plaintext should not match plaintext'); process.exit(1); }
             
             console.log('Match hash:', apiKeyMatches('a3f7b2c1d9e8', hash1));
             if (!apiKeyMatches('a3f7b2c1d9e8', hash1)) { console.error('FAIL: hash match failed'); process.exit(1); }
@@ -197,7 +197,11 @@ jobs:
             console.log('Reject mismatch:', !apiKeyMatches('wrong-key', hash1));
             if (apiKeyMatches('wrong-key', hash1)) { console.error('FAIL: wrong key matched'); process.exit(1); }
             
-            // Test 5: No ENCRYPTION_KEY needed — hashing only uses SHA256 built-in
+            // Test 5: Hash replay attack — sending a stored hash as x-api-key must NOT authenticate
+            console.log('Reject hash replay:', !apiKeyMatches(hash1, hash1));
+            if (apiKeyMatches(hash1, hash1)) { console.error('FAIL: hash replay accepted'); process.exit(1); }
+            
+            // Test 6: No ENCRYPTION_KEY needed — hashing only uses SHA256 built-in
             console.log('No env var needed: true');
             
             console.log('All hashing tests passed!');
