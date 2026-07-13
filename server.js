@@ -5,9 +5,9 @@
  * for multiple Minecraft servers. Each MC server syncs its
  * data here via outbound HTTP — no ports needed on the MC side.
  * 
- * Persistence: Astra DB (DataStaxa) via REST v2 API
+ * Persistence: Astra DB (DataStax) via REST v2 API
  * Caching: In-memory write-through cache for performance
- * Encryption: AES-256-GCM field-level encryption for sensitive data
+ * Security: SHA256 hashing for sensitive fields (api keys, player UUIDs)
  */
 
 const express = require('express');
@@ -39,135 +39,44 @@ const ASTRA_REST = ASTRA_BASE && ASTRA_KEYSPACE
     ? `${ASTRA_BASE}/api/rest/v2/keyspaces/${ASTRA_KEYSPACE}`
     : '';
 
-// ── Field-Level Encryption ──────────────────────────────────────
-// AES-256-GCM encryption for sensitive fields stored in Astra DB.
-// If ENCRYPTION_KEY is not set and Astra is enabled, fail fast.
-// If neither is set, run in plaintext mode (local/dev only).
-// Encrypted values are prefixed with "enc:" for auto-detection on read.
+// ── Hashing (replaces AES encryption) ──────────────────────────
+// One-way SHA256 hashing for sensitive fields stored in Astra DB.
+// API keys and player UUIDs are hashed before persistence and never
+// decrypted back. Comparisons are done by hashing the incoming value
+// and comparing hashes. This eliminates the ENCRYPTION_KEY dependency
+// and prevents stale entries across server restarts.
 
-const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || '';
-const ENCRYPTION_PREFIX = 'enc:';
-const ALGORITHM = 'aes-256-gcm';
-const IV_LENGTH = 12;    // 96-bit IV for GCM
-const AUTH_TAG_LENGTH = 16; // 128-bit auth tag
-const KEY_LENGTH = 32;   // 256-bit key
+const SESSION_HMAC_KEY = crypto.createHash('sha256').update('webmarketmc-session-key').digest();
 
-let encryptionEnabled = false;
-
-/**
- * Derive a 32-byte key from the ENCRYPTION_KEY env var.
- * Accepts either a 64-char hex string or any string (SHA-256 hashed).
- */
-function deriveKey(rawKey) {
-    if (!rawKey) return null;
-    // If it's a valid 64-char hex string, use it directly
-    if (/^[0-9a-f]{64}$/i.test(rawKey)) {
-        return Buffer.from(rawKey, 'hex');
-    }
-    // Otherwise hash it to get a 32-byte key
-    return crypto.createHash('sha256').update(rawKey).digest();
+function hashApiKey(key) {
+    if (!key) return '';
+    return crypto.createHash('sha256').update(String(key)).digest('hex');
 }
 
-const derivedKey = deriveKey(ENCRYPTION_KEY);
-if (derivedKey) {
-    encryptionEnabled = true;
-    console.log('[Encryption] AES-256-GCM field-level encryption enabled');
-} else if (ASTRA_TOKEN) {
-    // Astra persistence requires encryption for sensitive fields
-    console.error('[Encryption] ENCRYPTION_KEY is required when Astra persistence is enabled');
-    process.exit(1);
-} else {
-    console.log('[Encryption] No ENCRYPTION_KEY set — running in plaintext mode (local/dev only)');
+// Hash a player UUID for DB storage
+function hashUuid(uuid) {
+    if (!uuid) return '';
+    return crypto.createHash('sha256').update(String(uuid)).digest('hex');
 }
 
-/**
- * Encrypt a plaintext string using AES-256-GCM.
- * Returns "enc:<iv>:<ciphertext>:<authTag>" (all base64url).
- * Returns the original value if encryption is disabled.
- */
-function encrypt(plaintext) {
-    if (!encryptionEnabled || plaintext === null || plaintext === undefined) {
-        return plaintext;
-    }
-    const str = String(plaintext);
-    const iv = crypto.randomBytes(IV_LENGTH);
-    const cipher = crypto.createCipheriv(ALGORITHM, derivedKey, iv, { authTagLength: AUTH_TAG_LENGTH });
-    let encrypted = cipher.update(str, 'utf8', 'base64url');
-    encrypted += cipher.final('base64url');
-    const authTag = cipher.getAuthTag().toString('base64url');
-    const ivB64 = iv.toString('base64url');
-    return `${ENCRYPTION_PREFIX}${ivB64}:${encrypted}:${authTag}`;
-}
-
-/**
- * Decrypt a value that was encrypted by encrypt().
- * Auto-detects encrypted values by the "enc:" prefix.
- * Returns the original value if it's not encrypted or decryption is disabled.
- */
-function decrypt(ciphertext) {
-    if (!ciphertext || typeof ciphertext !== 'string' || !ciphertext.startsWith(ENCRYPTION_PREFIX)) {
-        return ciphertext;
-    }
-    if (!encryptionEnabled) {
-        console.warn('[Encryption] Found encrypted value but no key available — returning raw');
-        return ciphertext;
-    }
-    try {
-        const parts = ciphertext.slice(ENCRYPTION_PREFIX.length).split(':');
-        if (parts.length !== 3) {
-            console.error('[Encryption] Malformed encrypted value');
-            return ciphertext;
-        }
-        const [ivB64, encData, authTagB64] = parts;
-        const iv = Buffer.from(ivB64, 'base64url');
-        const authTag = Buffer.from(authTagB64, 'base64url');
-        const decipher = crypto.createDecipheriv(ALGORITHM, derivedKey, iv, { authTagLength: AUTH_TAG_LENGTH });
-        decipher.setAuthTag(authTag);
-        let decrypted = decipher.update(encData, 'base64url', 'utf8');
-        decrypted += decipher.final('utf8');
-        return decrypted;
-    } catch (e) {
-        console.error('[Encryption] Decryption failed:', e.message);
-        return ciphertext;
-    }
-}
-
-/**
- * Encrypt a JSON object by serializing and encrypting the whole string.
- * Used for balances_json which contains structured data.
- * Always returns a string (JSON in plaintext mode, encrypted in encrypted mode).
- */
-function encryptJson(obj) {
-    const json = JSON.stringify(obj ?? {});
-    return encryptionEnabled ? encrypt(json) : json;
-}
-
-/**
- * Decrypt an encrypted JSON string back to an object.
- * Falls back to JSON.parse for unencrypted values.
- */
-function decryptJson(ciphertext) {
-    if (!ciphertext) return {};
-    const decrypted = decrypt(ciphertext);
-    if (typeof decrypted !== 'string' || decrypted.startsWith(ENCRYPTION_PREFIX)) {
-        // Decryption failed or not encrypted — try parsing as-is
-        try { return JSON.parse(ciphertext); } catch { return {}; }
-    }
-    try { return JSON.parse(decrypted); } catch { return {}; }
-}
-
-/**
- * Deterministic hash for session token (used as stable primary key).
- * Uses HMAC-SHA256 with a fixed key derived from ENCRYPTION_KEY or a constant.
- */
+// Deterministic hash for session token (used as stable primary key).
 function tokenHash(token) {
-    const key = derivedKey || crypto.createHash('sha256').update('webmarketmc-session-key').digest();
-    return crypto.createHmac('sha256', key).update(token).digest('hex');
+    return crypto.createHmac('sha256', SESSION_HMAC_KEY).update(token).digest('hex');
+}
+
+// Compare an incoming plaintext apiKey against a stored hash.
+// The stored value may be a plaintext (legacy/memory-only) or a SHA256 hash.
+function apiKeyMatches(plaintext, stored) {
+    if (!plaintext || !stored) return false;
+    // Direct match (in-memory cache stores plaintext)
+    if (plaintext === stored) return true;
+    // Hash match (Astra DB stores hash)
+    return hashApiKey(plaintext) === stored;
 }
 
 // ── In-Memory Write-Through Cache ──────────────────────────────
 // These cache Astra DB data for fast reads; writes go to DB first
-// Cache stores DECRYPTED values — encryption only applies to DB storage
+// Cache stores PLAINTEXT values (api keys, uuids) — hashing only applies to DB storage
 /** @type {Map<string, object>} serverId → server data */
 const serverCache = new Map();
 /** @type {Map<string, object>} tokenHash → session data */
@@ -336,9 +245,11 @@ async function loadCacheFromDB() {
     console.log('[Cache] Loading data from Astra DB...');
 
     // Load servers (all pages, max 1000 to prevent OOM)
+    // DB stores hashed api keys — cache also stores hashes so comparisons work
     const serverRows = await loadAllPages('servers', 500, 1000);
     for (const row of serverRows) {
-        serverCache.set(row.server_id, deserializeServer(row));
+        const server = deserializeServer(row);
+        serverCache.set(server.serverId, server);
     }
     console.log(`[Cache] Loaded ${serverCache.size} servers`);
 
@@ -349,7 +260,7 @@ async function loadCacheFromDB() {
     for (const row of sessionRows) {
         if (row.expires > now) {
             const session = deserializeSession(row);
-            const tokenKey = row.session_token; // PK is the tokenHash stored in session_token column
+            const tokenKey = row.session_token;
             sessionCache.set(tokenKey, session);
             loadedSessions++;
         }
@@ -376,15 +287,16 @@ async function loadCacheFromDB() {
     console.log('[Cache] Ready');
 }
 
-// ── Serialization Helpers (with encryption) ─────────────────────
-// Serialization ENCRYPTS sensitive fields before writing to Astra DB.
-// Deserialization DECRYPTS fields when reading from Astra DB.
-// The in-memory cache always stores plaintext (decrypted) values.
+// ── Serialization Helpers (with hashing) ─────────────────────
+// Serialization HASHES sensitive fields before writing to Astra DB.
+// Deserialization returns hashed values as-is — comparisons use apiKeyMatches().
+// The in-memory cache stores hashed values (for servers loaded from DB)
+// or plaintext values (for freshly registered servers in memory-only mode).
 
 function serializeServer(s) {
     return {
         server_id: s.serverId,
-        api_key: encrypt(s.apiKey),
+        api_key: hashApiKey(s.apiKey),
         server_name: s.serverName || 'Minecraft Server',
         last_sync: s.lastSync || Date.now(),
         categories_json: JSON.stringify(s.categories || []),
@@ -402,7 +314,7 @@ function deserializeServer(row) {
     try { items = JSON.parse(row.items_json || '{}'); } catch {}
     return {
         serverId: row.server_id,
-        apiKey: decrypt(row.api_key),
+        apiKey: row.api_key, // Already hashed in DB — stays hashed in cache
         serverName: row.server_name,
         lastSync: row.last_sync,
         categories,
@@ -418,20 +330,22 @@ function serializeSession(token, s) {
     return {
         session_token: tokenHash(token), // PK is deterministic hash
         server_id: s.serverId,
-        player_uuid: encrypt(s.playerUuid),
+        player_uuid: hashUuid(s.playerUuid),
         player_name: s.playerName || 'Player',
-        balances_json: encryptJson(s.balances || {}),
+        balances_json: JSON.stringify(s.balances || {}),
         default_currency: s.defaultCurrency || 'Aurels',
         expires: s.expires,
     };
 }
 
 function deserializeSession(row) {
+    let balances = {};
+    try { balances = JSON.parse(row.balances_json || '{}'); } catch {}
     return {
         serverId: row.server_id,
-        playerUuid: decrypt(row.player_uuid),
+        playerUuid: row.player_uuid, // Hashed in DB — stays hashed in cache
         playerName: row.player_name || 'Player',
-        balances: decryptJson(row.balances_json),
+        balances,
         defaultCurrency: row.default_currency || 'Aurels',
         expires: row.expires,
     };
@@ -441,7 +355,7 @@ function serializePurchase(id, p) {
     return {
         purchase_id: id,
         server_id: p.serverId,
-        player_uuid: encrypt(p.playerUuid),
+        player_uuid: hashUuid(p.playerUuid),
         type: p.type,
         item_key: p.item || p.itemKey || '',
         auction_id: p.auctionId || 0,
@@ -449,17 +363,16 @@ function serializePurchase(id, p) {
         amount: String(p.amount || 0),
         status: p.status,
         created_at: p.createdAt,
-        result_json: p.result ? encrypt(JSON.stringify(p.result)) : '',
+        result_json: p.result ? JSON.stringify(p.result) : '',
     };
 }
 
 function deserializePurchase(row) {
     let result = null;
-    const resultRaw = decrypt(row.result_json || '');
-    try { result = JSON.parse(resultRaw || 'null'); } catch {}
+    try { result = JSON.parse(row.result_json || 'null'); } catch {}
     return {
         serverId: row.server_id,
-        playerUuid: decrypt(row.player_uuid),
+        playerUuid: row.player_uuid, // Hashed in DB — stays hashed in cache
         type: row.type,
         item: row.item_key,
         itemKey: row.item_key,
@@ -486,7 +399,7 @@ app.use('/api/', rateLimit({
     skip: (req) => {
         const sid = req.headers['x-server-id'];
         const s = serverCache.get(sid);
-        return s && s.apiKey === req.headers['x-api-key'];
+        return s && apiKeyMatches(req.headers['x-api-key'], s.apiKey);
     }
 }));
 
@@ -506,7 +419,7 @@ function requireApiKey(req, res, next) {
     }
 
     const server = serverCache.get(serverId);
-    if (!server || server.apiKey !== apiKey) {
+    if (!server || !apiKeyMatches(apiKey, server.apiKey)) {
         return res.status(403).json({ error: 'Invalid server ID or API key' });
     }
 
@@ -531,50 +444,46 @@ app.post('/api/register', async (req, res) => {
     // Check if server already exists in cache
     if (serverCache.has(serverId)) {
         const existing = serverCache.get(serverId);
-        if (existing.apiKey !== apiKey) {
-            // API key mismatch — allow rotation if caller proves knowledge of
-            // current key (x-current-api-key header) OR REGISTRATION_SECRET is set.
-            // This prevents takeover via public /shop/:serverId URL while allowing
-            // legitimate server restarts (which know their current key).
-            const currentKeyHeader = req.headers['x-current-api-key'];
-            const knowsCurrentKey = currentKeyHeader && currentKeyHeader === existing.apiKey;
-            const hasRegSecret = regSecret && req.headers['x-registration-secret'] === regSecret;
-
-            if (!knowsCurrentKey && !hasRegSecret) {
-                console.log(`[Register] API key mismatch for ${serverId} — rejecting (no proof of current key or REGISTRATION_SECRET)`);
-                return res.status(403).json({ error: 'Server ID already registered with different API key. Provide x-current-api-key header with current key, or configure REGISTRATION_SECRET.' });
+        if (apiKeyMatches(apiKey, existing.apiKey)) {
+            // Same key — re-register: update lastSync
+            existing.lastSync = Date.now();
+            if (ASTRA_TOKEN) {
+                const syncResult = await astraUpdate('servers', serverId, { last_sync: existing.lastSync });
+                if (!syncResult.ok) {
+                    console.error('[Register] Failed to persist last_sync to Astra:', syncResult.error);
+                }
             }
-            console.log(`[Register] API key updated for ${serverId} (authorized key rotation)`);
-            const oldApiKey = existing.apiKey;
-            const oldServerName = existing.serverName;
-            const oldLastSync = existing.lastSync;
+            return res.json({ success: true });
+        }
+        // API key mismatch — check if caller knows the current key (rotation)
+        const currentKeyHeader = req.headers['x-current-api-key'];
+        const knowsCurrentKey = currentKeyHeader && apiKeyMatches(currentKeyHeader, existing.apiKey);
+        const hasRegSecret = regSecret && req.headers['x-registration-secret'] === regSecret;
+
+        if (knowsCurrentKey || hasRegSecret) {
+            console.log(`[Register] Authorized key rotation for ${serverId}`);
+            // Update to new key (store plaintext in cache for memory-only mode,
+            // hash will be applied on DB write)
             existing.apiKey = apiKey;
             existing.serverName = serverName || existing.serverName;
             existing.lastSync = Date.now();
             if (ASTRA_TOKEN) {
                 const updateResult = await astraUpdate('servers', serverId, {
-                    api_key: encrypt(apiKey),
+                    api_key: hashApiKey(apiKey),
                     server_name: existing.serverName,
                     last_sync: existing.lastSync,
                 });
                 if (!updateResult.ok) {
-                    // Rollback cache to pre-rotation state so a retry takes the mismatch path again
-                    existing.apiKey = oldApiKey;
-                    existing.serverName = oldServerName;
-                    existing.lastSync = oldLastSync;
                     console.error('[Register] Failed to persist API key rotation to Astra:', updateResult.error);
                     return res.status(500).json({ error: 'Failed to update server credentials' });
                 }
             }
+            serverCache.set(serverId, existing);
             return res.json({ success: true, reRegistered: true });
-        } else {
-            // Same key — re-register: update lastSync
-            existing.lastSync = Date.now();
-            if (ASTRA_TOKEN) {
-                await astraUpdate('servers', serverId, { last_sync: existing.lastSync });
-            }
-            return res.json({ success: true });
         }
+
+        console.log(`[Register] API key mismatch for ${serverId} — rejecting (no proof of current key or REGISTRATION_SECRET)`);
+        return res.status(403).json({ error: 'Server ID already registered with different API key. Provide x-current-api-key header with current key, or configure REGISTRATION_SECRET.' });
     }
 
     // Check Astra DB for existing server (may have survived a restart)
@@ -582,35 +491,8 @@ app.post('/api/register', async (req, res) => {
         const dbResult = await astraGet('servers', serverId);
         if (dbResult.ok && dbResult.data?.data) {
             const existing = deserializeServer(dbResult.data.data);
-            if (existing.apiKey !== apiKey) {
-                // API key mismatch — allow rotation if caller proves knowledge of
-                // current key (x-current-api-key header) OR REGISTRATION_SECRET is set.
-                const currentKeyHeader = req.headers['x-current-api-key'];
-                const knowsCurrentKey = currentKeyHeader && currentKeyHeader === existing.apiKey;
-                const hasRegSecret = regSecret && req.headers['x-registration-secret'] === regSecret;
-                
-                if (!knowsCurrentKey && !hasRegSecret) {
-                    console.log(`[Register] DB API key mismatch for ${serverId} — rejecting (no proof of current key or REGISTRATION_SECRET)`);
-                    return res.status(403).json({ error: 'Server ID already registered with different API key. Provide x-current-api-key header with current key, or configure REGISTRATION_SECRET.' });
-                }
-                console.log(`[Register] DB API key updated for ${serverId} (authorized key rotation)`);
-                const oldApiKey = existing.apiKey;
-                existing.apiKey = apiKey;
-                existing.serverName = serverName || existing.serverName;
-                existing.lastSync = Date.now();
-                const updateResult = await astraUpdate('servers', serverId, {
-                    api_key: encrypt(apiKey),
-                    server_name: existing.serverName,
-                    last_sync: existing.lastSync,
-                });
-                if (!updateResult.ok) {
-                    // Don't cache the new key — leave Astra as source of truth with old key
-                    console.error('[Register] Failed to persist API key rotation to Astra:', updateResult.error);
-                    return res.status(500).json({ error: 'Failed to update server credentials' });
-                }
-                serverCache.set(serverId, existing);
-                return res.json({ success: true, reRegistered: true });
-            } else {
+
+            if (apiKeyMatches(apiKey, existing.apiKey)) {
                 // Same key — restore to cache
                 existing.lastSync = Date.now();
                 serverCache.set(serverId, existing);
@@ -618,6 +500,33 @@ app.post('/api/register', async (req, res) => {
                 console.log(`[Register] Restored server "${existing.serverName}" from DB (${serverId})`);
                 return res.json({ success: true });
             }
+
+            // API key mismatch — allow rotation if caller proves knowledge of
+            // current key (x-current-api-key header) OR REGISTRATION_SECRET is set.
+            const currentKeyHeader = req.headers['x-current-api-key'];
+            const knowsCurrentKey = currentKeyHeader && apiKeyMatches(currentKeyHeader, existing.apiKey);
+            const hasRegSecret = regSecret && req.headers['x-registration-secret'] === regSecret;
+
+            if (!knowsCurrentKey && !hasRegSecret) {
+                console.log(`[Register] DB API key mismatch for ${serverId} — rejecting (no proof of current key or REGISTRATION_SECRET)`);
+                return res.status(403).json({ error: 'Server ID already registered with different API key. Provide x-current-api-key header with current key, or configure REGISTRATION_SECRET.' });
+            }
+
+            console.log(`[Register] DB API key updated for ${serverId} (authorized key rotation)`);
+            existing.apiKey = apiKey; // Store plaintext in cache
+            existing.serverName = serverName || existing.serverName;
+            existing.lastSync = Date.now();
+            const updateResult = await astraUpdate('servers', serverId, {
+                api_key: hashApiKey(apiKey),
+                server_name: existing.serverName,
+                last_sync: existing.lastSync,
+            });
+            if (!updateResult.ok) {
+                console.error('[Register] Failed to persist API key rotation to Astra:', updateResult.error);
+                return res.status(500).json({ error: 'Failed to update server credentials' });
+            }
+            serverCache.set(serverId, existing);
+            return res.json({ success: true, reRegistered: true });
         }
     }
 
@@ -750,14 +659,13 @@ app.post('/api/session', requireApiKey, async (req, res) => {
 
     const session = {
         serverId: req.serverId,
-        playerUuid,
+        playerUuid, // Plaintext in cache for IDOR checks
         playerName: playerName || 'Player',
         balances: balances || {},
         defaultCurrency: defaultCurrency || 'Aurels',
         expires: Date.now() + 3_600_000,
     };
 
-    // Cache key is deterministic tokenHash — encryption only applies to DB storage
     const tokenKey = tokenHash(token);
     sessionCache.set(tokenKey, session);
 
@@ -778,10 +686,8 @@ app.post('/api/session-update', requireApiKey, async (req, res) => {
         if (session.serverId === req.serverId && session.playerUuid === playerUuid) {
             session.balances = balances;
             if (ASTRA_TOKEN) {
-                // Need to find the original token to get the PK (tokenHash)
-                // Since we only have tokenKey (which IS the tokenHash), we can use it directly
                 updates.push(astraUpdate('sessions', tokenKey, {
-                    balances_json: encryptJson(balances),
+                    balances_json: JSON.stringify(balances),
                 }).catch(e => console.error('[Astra] Session update failed:', e.message)));
             }
         }
@@ -806,7 +712,7 @@ app.post('/api/confirm-purchase', requireApiKey, async (req, res) => {
     if (ASTRA_TOKEN) {
         await astraUpdate('purchases', purchaseId, {
             status: purchase.status,
-            result_json: encrypt(JSON.stringify(purchase.result)),
+            result_json: JSON.stringify(purchase.result),
         });
     }
 
@@ -1179,7 +1085,7 @@ async function start() {
     app.listen(PORT, () => {
         console.log(`Aurelium Web Dashboard running on port ${PORT}`);
         console.log(`Persistence: ${ASTRA_TOKEN ? 'Astra DB + in-memory cache' : 'in-memory only (no ASTRA_TOKEN)'}`);
-        console.log(`Encryption: ${encryptionEnabled ? 'AES-256-GCM (field-level)' : 'disabled (no ENCRYPTION_KEY)'}`);
+        console.log(`Security: SHA256 hashing (one-way, no ENCRYPTION_KEY needed)`);
     });
 }
 
